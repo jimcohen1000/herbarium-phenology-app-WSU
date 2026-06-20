@@ -127,7 +127,7 @@ with c1:
         if inat_submitted:
             records = []
             
-            # Generate and shuffle years just like GBIF
+            # Generate and shuffle years to guarantee robust temporal spread
             available_years = list(range(d1.year, d2.year + 1))
             random_years = random.choices(available_years, k=inat_limit * 3)
             
@@ -141,7 +141,6 @@ with c1:
                 if len(collected_data) >= inat_limit:
                     break
                 
-                # Fetch up to 2 records for this random year
                 url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&d1={y}-01-01&d2={y}-12-31&per_page=2"
                 try:
                     res = requests.get(url, timeout=5)
@@ -358,12 +357,12 @@ with c2:
         
     st.write("---")
     
-   # --- TABLE SECTION ---
+    # --- TABLE SECTION ---
     st.subheader("📋 Formatted Database Ledger")
     if not df.empty:
         df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
             
-    # Added key="herbarium_ledger" to protect data from vanishing on reruns
+    # Session state key protects data from wiping during unexpected widget redrawing
     edited_df = st.data_editor(
         df, 
         key="herbarium_ledger",
@@ -391,7 +390,7 @@ with c2:
             st.rerun()
 
     with col_dl:
-        # Read directly from the persistent disk file to completely prevent data truncation
+        # Read straight from file to isolate the stream data from widget lifecycles
         try:
             with open(db_file, "r", encoding="utf-8") as f:
                 csv_data = f.read()
