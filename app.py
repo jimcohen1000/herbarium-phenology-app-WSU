@@ -155,7 +155,6 @@ with st.sidebar:
     st.markdown("---")
     st.title("💾 Export Database")
     
-    # We load the dataframe here to ensure exports have the latest data
     df_export = pd.read_csv(db_file)
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     clean_csv = b""
@@ -202,17 +201,25 @@ st.title("🌱 Herbarium Specimen Tracker")
 
 df = pd.read_csv(db_file)
 
-# --- TYPE SAFETY FIX FOR STREAMLIT DATA EDITOR ---
-# Checkbox columns crash if they receive NaN or text. Force them to Booleans:
-for col in ["Flowering", "Fruiting", "Vegetative"]:
-    if col in df.columns:
-        df[col] = df[col].fillna(False).astype(bool)
+# --- ENHANCED TYPE SAFETY FIX FOR STREAMLIT DATA EDITOR ---
+if not df.empty:
+    # 1. Drop totally blank "ghost" rows from the bottom of the CSV
+    df = df.dropna(how='all')
+    
+    # 2. Checkbox columns MUST be Booleans (No NaN)
+    for col in ["Flowering", "Fruiting", "Vegetative"]:
+        if col in df.columns:
+            df[col] = df[col].fillna(False).astype(bool)
 
-# Number columns crash if they receive strings. Force them to numeric:
-for col in ["Year", "DOY", "Latitude", "Longitude", "Elevation"]:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
+    # 3. Number columns MUST be numeric
+    for col in ["Year", "DOY", "Latitude", "Longitude", "Elevation"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+    # 4. Text & Link columns MUST be strings (No NaN floats allowed)
+    for col in ["Data_Source", "URL", "Species", "Collector", "Barcode", "Col_Number"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
 
 st.subheader("📋 Database Ledger")
 if not df.empty:
@@ -255,6 +262,9 @@ if df.empty:
     st.info("The ledger is currently empty. Ingest specimen data via the sidebar to generate figures.")
 else:
     plot_df = edited_df.copy()
+    plot_df['Year'] = pd.to_numeric(plot_df['Year'], errors='coerce')
+    plot_df['DOY'] = pd.to_numeric(plot_df['DOY'], errors='coerce')
+    plot_df['Latitude'] = pd.to_numeric(plot_df['Latitude'], errors='coerce')
     
     if 'Y_MAT' not in plot_df.columns:
         plot_df['Y_MAT'] = 12.5 + (plot_df['Year'] - 2000) * 0.04
