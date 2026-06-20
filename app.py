@@ -4,6 +4,7 @@ import plotly.express as px
 import os
 import requests
 import time
+import random
 from datetime import date, datetime
 
 st.set_page_config(layout="wide")
@@ -190,92 +191,109 @@ with c1:
             gbif_spp = st.text_input("Target Species", "Anemone patens", key="g_spp")
             
             col_g1, col_g2 = st.columns(2)
-            with col_g1: g_d1 = st.date_input("Start Date", value=date(1950, 1, 1), key="g_d1")
+            # Default changed to 1900
+            with col_g1: g_d1 = st.date_input("Start Date", value=date(1900, 1, 1), key="g_d1")
             with col_g2: g_d2 = st.date_input("End Date", value=date(2022, 12, 31), key="g_d2")
             
             gbif_limit = st.slider("Records to Fetch", 5, 50, 25, step=5, key="g_lim")
-            st.info("Pulls Collector, Barcode & Image URL -> Validates Elevation -> Fetches ClimateNA.")
+            st.info("Randomly samples years in your range -> Pulls Images/Data -> Fetches ClimateNA.")
             
             gbif_submitted = st.form_submit_button("📥 FETCH HERBARIA DATA", type="primary", use_container_width=True)
             
         if gbif_submitted:
             records = []
-            date_range = f"{g_d1.strftime('%Y-%m-%d')},{g_d2.strftime('%Y-%m-%d')}"
             
-            # API query demands: Correct Species, Has Coordinates, Is an Image, Is a Physical Specimen
-            url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&eventDate={date_range}&limit={gbif_limit}"
+            # Generate a list of years and shuffle them to get a random representation
+            available_years = list(range(g_d1.year, g_d2.year + 1))
             
-            st.write(f"Contacting GBIF network for {gbif_limit} records...")
-            res = requests.get(url, timeout=15)
+            # Draw plenty of random years (with replacement) in case some years have no data
+            random_years = random.choices(available_years, k=gbif_limit * 3)
             
-            if res.status_code == 200:
-                data = res.json().get('results', [])
-                if data:
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    for i, obs in enumerate(data):
-                        y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
-                        lat, lon = obs.get('decimalLatitude'), obs.get('decimalLongitude')
-                        
-                        # Only proceed if we have complete dates and coordinates
-                        if y and m and d and lat and lon:
-                            try:
-                                dt = datetime(int(y), int(m), int(d))
-                                
-                                # Use elevation from herbarium if available, otherwise fetch Open-Meteo
-                                el = obs.get('elevation')
-                                if pd.isna(el) or el is None:
-                                    status_text.text(f"Processing {i+1}/{len(data)}: Finding elevation...")
-                                    el = get_elevation(lat, lon)
-                                
-                                # Determine URL (Prefer the institution's page, otherwise the direct image link)
-                                rec_url = obs.get('references', '')
-                                if not rec_url and obs.get('media'):
-                                    rec_url = obs.get('media')[0].get('identifier', '')
-                                    
-                                row = {
-                                    "Data_Source": "Digitized Herbarium",
-                                    "Collector": obs.get('recordedBy', ''),
-                                    "Col_Number": obs.get('recordNumber', ''),
-                                    "Barcode": obs.get('catalogNumber', ''),
-                                    "Species": obs.get('species', gbif_spp),
-                                    "Latitude": float(lat), "Longitude": float(lon), "Elevation": el,
-                                    "Year": dt.year, "DOY": dt.timetuple().tm_yday,
-                                    "Flowering": False, "Fruiting": False, "Vegetative": False,
-                                    "URL": rec_url
-                                }
-                                
-                                if el is not None:
-                                    status_text.text(f"Processing {i+1}/{len(data)}: Pulling climate models...")
-                                    year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
-                                    norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
-                                    for k, v in year_data.items(): row[f"Y_{k}"] = v
-                                    for k, v in norm_data.items(): row[f"N_{k}"] = v
-                                
-                                records.append(row)
-                            except Exception:
-                                pass
-                        
-                        progress_bar.progress((i + 1) / len(data))
-                    
-                    status_text.text("Finished processing!")
-                    
-                    if records:
-                        try:
-                            df_existing = pd.read_csv(db_file)
-                        except Exception:
-                            df_existing = pd.DataFrame(columns=base_headers)
+            st.write(f"Scouting global databases for {gbif_limit} randomized records...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            collected_data = []
+            
+            for y in random_years:
+                if len(collected_data) >= gbif_limit:
+                    break
+                
+                # Fetch 2 records max for this random year to keep variation high
+                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&year={y}&limit=2"
+                try:
+                    res = requests.get(url, timeout=5)
+                    if res.status_code == 200:
+                        data = res.json().get('results', [])
+                        if data:
+                            # Pick one random record from the results for this year
+                            obs = random.choice(data)
                             
-                        df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
-                        save_with_ordered_columns(df_combined, db_file)
-                        st.success(f"Successfully added {len(records)} digital herbarium records!")
-                        time.sleep(1.5)
-                        st.rerun()
-                else:
-                    st.warning("No digital herbarium records found with images & coordinates for those dates.")
+                            # Make sure it's not a duplicate based on key
+                            if obs.get('key') not in [d.get('key') for d in collected_data]:
+                                collected_data.append(obs)
+                                status_text.text(f"Found record from {y}... ({len(collected_data)}/{gbif_limit})")
+                except Exception:
+                    pass
+            
+            # Now process the gathered, randomized records
+            if collected_data:
+                for i, obs in enumerate(collected_data):
+                    y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
+                    lat, lon = obs.get('decimalLatitude'), obs.get('decimalLongitude')
+                    
+                    if y and m and d and lat and lon:
+                        try:
+                            dt = datetime(int(y), int(m), int(d))
+                            el = obs.get('elevation')
+                            if pd.isna(el) or el is None:
+                                status_text.text(f"Processing {i+1}/{len(collected_data)}: Finding elevation...")
+                                el = get_elevation(lat, lon)
+                            
+                            rec_url = obs.get('references', '')
+                            if not rec_url and obs.get('media'):
+                                rec_url = obs.get('media')[0].get('identifier', '')
+                                
+                            row = {
+                                "Data_Source": "Digitized Herbarium",
+                                "Collector": obs.get('recordedBy', ''),
+                                "Col_Number": obs.get('recordNumber', ''),
+                                "Barcode": obs.get('catalogNumber', ''),
+                                "Species": obs.get('species', gbif_spp),
+                                "Latitude": float(lat), "Longitude": float(lon), "Elevation": el,
+                                "Year": dt.year, "DOY": dt.timetuple().tm_yday,
+                                "Flowering": False, "Fruiting": False, "Vegetative": False,
+                                "URL": rec_url
+                            }
+                            
+                            if el is not None:
+                                status_text.text(f"Processing {i+1}/{len(collected_data)}: Pulling climate models...")
+                                year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
+                                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                                for k, v in year_data.items(): row[f"Y_{k}"] = v
+                                for k, v in norm_data.items(): row[f"N_{k}"] = v
+                            
+                            records.append(row)
+                        except Exception:
+                            pass
+                    
+                    progress_bar.progress((i + 1) / len(collected_data))
+                
+                status_text.text("Finished processing!")
+                
+                if records:
+                    try:
+                        df_existing = pd.read_csv(db_file)
+                    except Exception:
+                        df_existing = pd.DataFrame(columns=base_headers)
+                        
+                    df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
+                    save_with_ordered_columns(df_combined, db_file)
+                    st.success(f"Successfully added {len(records)} temporally randomized herbarium records!")
+                    time.sleep(1.5)
+                    st.rerun()
             else:
-                st.error("Failed to connect to the global database.")
+                st.warning("Could not find enough digital herbarium records with images & coordinates for those randomized years.")
 
 # Column 2: Graphing & Database
 with c2:
