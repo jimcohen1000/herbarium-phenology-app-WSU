@@ -392,7 +392,7 @@ with col_save:
 #          GRAPHING & TRENDS DASHBOARD
 # ==========================================
 st.write("---")
-st.subheader("📊 Climate Trend Analytics")
+st.subheader("📊 Dynamic Data Explorer")
 
 if df.empty:
     st.info("The ledger is currently empty. Ingest specimen data via the sidebar to generate figures.")
@@ -409,59 +409,37 @@ else:
     for col in climate_cols:
         plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
 
-    if 'Y_MAT' not in plot_df.columns:
-        has_climate_data = False
-    else:
-        has_climate_data = True
-
-    plot_df = plot_df.dropna(subset=['Year', 'DOY'])
+    # Dynamically grab all numeric columns for the dropdowns
+    numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
     
-    if not plot_df.empty:
-        fig_col1, fig_col2 = st.columns(2)
+    if len(numeric_cols) < 2:
+        st.warning("Not enough numeric data to plot. Add more records to generate graphs.")
+    else:
+        st.markdown("Use the dropdowns below to explore relationships between any two variables in your dataset.")
         
-        with fig_col1:
-            st.markdown("**Chronological Trend: Mean Annual Temp vs. Collection Year**")
-            if has_climate_data:
-                yearly_summary = plot_df.groupby('Year')['Y_MAT'].mean().reset_index()
-                fig_temp = px.line(
-                    yearly_summary, x='Year', y='Y_MAT', 
-                    labels={'Y_MAT': 'Mean Annual Temp (°C)', 'Year': 'Collection Year'},
-                    markers=True, template="streamlit"
-                )
-                fig_temp.update_layout(margin=dict(l=20, r=20, t=10, b=20))
-                st.plotly_chart(fig_temp, use_container_width=True)
-            else:
-                st.warning("No ClimateNA data found yet. Fetch records to generate this graph.")
-
-        with fig_col2:
-            st.markdown("**Phenological Profile: Dynamic Scatter Plot**")
+        # Set sensible starting defaults (if they exist in the data)
+        default_x_ix = numeric_cols.index('Year') if 'Year' in numeric_cols else 0
+        default_y_ix = numeric_cols.index('DOY') if 'DOY' in numeric_cols else 1
+        
+        # Place dropdown selectors side-by-side
+        sel_col1, sel_col2 = st.columns(2)
+        with sel_col1:
+            selected_x = st.selectbox("Select X-Axis:", options=numeric_cols, index=default_x_ix)
+        with sel_col2:
+            selected_y = st.selectbox("Select Y-Axis:", options=numeric_cols, index=default_y_ix)
             
-            # Dynamically grab all numeric columns for the dropdown
-            numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
-            
-            # Remove DOY from the options so we aren't graphing DOY vs DOY
-            if 'DOY' in numeric_cols:
-                numeric_cols.remove('DOY')
-                
-            # Set a sensible default starting variable (Latitude if it exists)
-            default_ix = numeric_cols.index('Latitude') if 'Latitude' in numeric_cols else 0
-            
-            # The dropdown selector
-            selected_x_var = st.selectbox(
-                "Select X-Axis Variable:", 
-                options=numeric_cols, 
-                index=default_ix
-            )
-            
-            # Generate the scatter plot using the selected variable
-            fig_pheno = px.scatter(
-                plot_df, 
-                x=selected_x_var, 
-                y='DOY', 
-                color='Species' if 'Species' in plot_df.columns else None,
-                hover_data=['Collector', 'Year'],
-                labels={'DOY': 'Day of Year (DOY)', selected_x_var: selected_x_var},
-                template="streamlit"
-            )
-            fig_pheno.update_layout(margin=dict(l=20, r=20, t=10, b=20))
-            st.plotly_chart(fig_pheno, use_container_width=True)
+        # Generate the dynamic scatter plot
+        fig_explorer = px.scatter(
+            plot_df, 
+            x=selected_x, 
+            y=selected_y, 
+            color='Species' if 'Species' in plot_df.columns else None,
+            hover_data=['Collector', 'Year', 'DOY'] if all(c in plot_df.columns for c in ['Collector', 'Year', 'DOY']) else None,
+            labels={selected_x: selected_x, selected_y: selected_y},
+            template="streamlit",
+            title=f"{selected_y} vs. {selected_x}"
+        )
+        
+        # Make the chart look clean and utilize the page width
+        fig_explorer.update_layout(margin=dict(l=20, r=20, t=40, b=20))
+        st.plotly_chart(fig_explorer, use_container_width=True)
