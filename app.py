@@ -56,43 +56,60 @@ def get_climate_data(lat, lon, el, period):
     try:
         res = requests.get(url, params=params, timeout=10)
         
-        # Catch both 429 (Too Many Requests) and 403 (Forbidden/Limit Exceeded)
         if res.status_code in [429, 403]: 
             return {"_LIMIT_REACHED": True}
             
         elif res.status_code == 200:
             data = res.json()
-            # Failsafe if the API sends a 200 OK but includes an error message
             if isinstance(data, dict) and "limit" in str(data.get("error", "")).lower():
                 return {"_LIMIT_REACHED": True}
             return data
-            
     except: pass
     return {}
 
 def thin_and_cap_data(df, target_limit, max_per_year):
-    # Drop rows missing coordinates or year to make sure we don't count junk
-    valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year'])
-    # Shuffle randomly
+    # Drop completely invalid rows
+    valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'URL']).copy()
+    valid_df = valid_df[valid_df['URL'].str.strip() != '']
+    
+    # Shuffle randomly first to avoid geographic bias before capping
     valid_df = valid_df.sample(frac=1).reset_index(drop=True)
-    # Cap at max_per_year
     capped_df = valid_df.groupby('Year').head(max_per_year)
-    # Enforce overall target_limit
-    return capped_df.head(target_limit)
+    
+    # Try to select non-consecutive years to evenly distribute data
+    capped_df = capped_df.sort_values('Year')
+    unique_years = capped_df['Year'].unique()
+    
+    selected_years = []
+    last_y = -999
+    for y in unique_years:
+        if y - last_y >= 2: # At least a 1-year gap
+            selected_years.append(y)
+            last_y = y
+            
+    # Filter to evenly spaced years
+    spaced_df = capped_df[capped_df['Year'].isin(selected_years)]
+    
+    # If we didn't hit our target limit with non-consecutive years, fill in the gaps
+    if len(spaced_df) < target_limit:
+        remaining_df = capped_df[~capped_df['Year'].isin(selected_years)]
+        needed = target_limit - len(spaced_df)
+        spaced_df = pd.concat([spaced_df, remaining_df.head(needed)])
+        
+    return spaced_df.head(target_limit).sample(frac=1).reset_index(drop=True)
 
 def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     if raw_df.empty:
-        st.sidebar.warning("No records found in that date range.")
+        st.sidebar.warning("No records found (or none passed the URL/duplication filters).")
         return
 
-    st.sidebar.text(f"Applying de-clustering (Max {max_per_year}/yr)...")
+    st.sidebar.text(f"Applying de-clustering & year distribution...")
     cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year)
     
     records = []
     progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
     
-    # Check session state before we even start
     limit_reached_flag = st.session_state.climate_limit_hit 
     
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
@@ -103,7 +120,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
         year = safe_int(row_dict.get('Year'))
         el = safe_float(row_dict.get('Elevation'))
         
-        # Enforce clean Year assignment
         row_dict['Year'] = year if year is not None else pd.NA
         
         if lat is not None and lon is not None:
@@ -119,7 +135,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             # 2. Fetch Climate Data
             if year is not None:
                 if not limit_reached_flag:
-                    climate_year = min(year, 2022) # ClimateNA currently maxes at 2022
+                    climate_year = min(year, 2022)
                     status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                     year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
                     
@@ -136,8 +152,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                             for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
                 
         records.append(row_dict)
-        
-        # Safely calculate progress and ensure it never mathematically exceeds 1.0
         progress_val = min((count + 1) / len(cleaned_df), 1.0)
         progress_bar.progress(progress_val)
         
@@ -147,14 +161,12 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
         final_new_df = pd.DataFrame(records)
         master_df = pd.read_csv(db_file)
         
-        # Force all base headers to exist
         for col in base_headers:
             if col not in final_new_df.columns: final_new_df[col] = pd.NA
             if col not in master_df.columns: master_df[col] = pd.NA
             
         combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
         
-        # Sort columns so base headers are first, followed by dynamically generated climate columns
         new_order = [c for c in base_headers if c in combined_df.columns]
         new_order += [c for c in combined_df.columns if c not in new_order]
         
@@ -169,10 +181,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
 # ==========================================
 st.sidebar.header("Data Entry & Ingestion")
 
-# Check and display the API limit warning persistently right at the top of the sidebar
 if st.session_state.climate_limit_hit:
-    st.sidebar.error("⚠️ **ClimateNA Limit Reached!**\n\nYou have exceeded the 50 queries per hour limit. Wait a while before querying more. New records will be added without climate fields in the meantime.")
-    if st.sidebar.button("Dismiss Warning", type="primary"):
+    st.sidebar.error("⚠️ **ClimateNA Limit Reached!**\n\nWait 1 hour before querying more.")
+    if st.sidebar.button("Dismiss Warning", type="primary", key="dismiss_sb"):
         st.session_state.climate_limit_hit = False
         st.rerun()
 
@@ -180,11 +191,18 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
     with st.form("manual_entry_form"):
         st.markdown("**Add a New Specimen Record**")
         m_spp = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale")
-        m_col = st.text_input("Collector:")
         
-        c1, c2 = st.columns(2)
-        with c1: m_yr = st.number_input("Year:", min_value=1800, max_value=2026, value=datetime.now().year)
-        with c2: m_doy = st.number_input("DOY:", min_value=1, max_value=366, value=1)
+        m_date = st.date_input("Collection Date:", value=datetime.now().date())
+        m_yr = m_date.year
+        m_doy = m_date.timetuple().tm_yday
+        
+        c_m1, c_m2 = st.columns(2)
+        with c_m1: m_col = st.text_input("Collector:")
+        with c_m2: m_col_num = st.text_input("Col. Number:")
+        
+        c_m3, c_m4 = st.columns(2)
+        with c_m3: m_barcode = st.text_input("Barcode:")
+        with c_m4: m_elev = st.number_input("Elev. Override:", format="%.2f", value=0.0, help="Leave 0.0 to auto-fetch")
         
         c3, c4 = st.columns(2)
         with c3: m_lat = st.number_input("Latitude:", format="%.5f", value=0.0)
@@ -199,18 +217,17 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
                 new_record = [{
                     "Data_Source": "Manual Entry",
                     "Collector": m_col,
-                    "Col_Number": "",
-                    "Barcode": "",
+                    "Col_Number": m_col_num,
+                    "Barcode": m_barcode,
                     "Species": m_spp,
                     "Year": m_yr,
                     "DOY": m_doy,
                     "Latitude": m_lat,
                     "Longitude": m_lon,
-                    "Elevation": pd.NA,
-                    "URL": "",
+                    "Elevation": m_elev if m_elev != 0.0 else pd.NA,
+                    "URL": "Manual",
                     "Flowering": False, "Fruiting": False, "Vegetative": False
                 }]
-                # Push through the pipeline to auto-fetch elevation and climate!
                 pipeline_enrich_and_save(pd.DataFrame(new_record), target_limit=1, max_per_year=1)
 
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
@@ -226,16 +243,27 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
         with st.spinner("Querying GBIF..."):
             spp_encoded = urllib.parse.quote(gbif_spp)
-            fetch_limit = min(g_limit * 5, 300) # Over-fetch to ensure we have enough to survive thinning
+            fetch_limit = min(g_limit * 6, 300) 
             url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit={fetch_limit}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
             
             raw_records = []
+            seen_col_nums = set()
+            
             try:
                 res = requests.get(url, timeout=10)
                 if res.status_code == 200:
                     for obs in res.json().get('results', []):
+                        # Filter out missing URLs
                         rec_url = obs.get('references', '')
-                        if not rec_url and obs.get('media'): rec_url = obs.get('media')[0].get('identifier', '')
+                        if not rec_url and obs.get('media'): 
+                            rec_url = obs.get('media')[0].get('identifier', '')
+                        if not rec_url: continue
+                            
+                        # Deduplicate Collection Numbers
+                        col_num = obs.get('recordNumber', '')
+                        if col_num:
+                            if col_num in seen_col_nums: continue
+                            seen_col_nums.add(col_num)
                         
                         y = obs.get('year')
                         m = obs.get('month')
@@ -251,9 +279,9 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                             except: pass
                         
                         raw_records.append({
-                            "Data_Source": "Digitized Herbarium",
+                            "Data_Source": "GBIF Herbarium",
                             "Collector": obs.get('recordedBy', ''),
-                            "Col_Number": obs.get('recordNumber', ''),
+                            "Col_Number": col_num,
                             "Barcode": obs.get('catalogNumber', ''),
                             "Species": obs.get('species', gbif_spp),
                             "Year": safe_int(y) if y else pd.NA,
@@ -290,6 +318,10 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                 res = requests.get(url, timeout=10)
                 if res.status_code == 200:
                     for obs in res.json().get('results', []):
+                        # Filter out missing URLs
+                        rec_url = obs.get('uri', '')
+                        if not rec_url: continue
+                            
                         if obs.get('location') and obs.get('observed_on'):
                             lat_str, lon_str = obs['location'].split(',')
                             try:
@@ -301,11 +333,12 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                             raw_records.append({
                                 "Data_Source": "iNaturalist",
                                 "Collector": obs.get('user', {}).get('login', ''),
+                                "Col_Number": "", "Barcode": str(obs.get('id', '')),
                                 "Species": obs.get('taxon', {}).get('name', inat_spp),
                                 "Year": obs_year, "DOY": obs_doy,
                                 "Latitude": float(lat_str), "Longitude": float(lon_str),
                                 "Elevation": pd.NA,
-                                "URL": obs.get('uri', ""),
+                                "URL": rec_url,
                                 "Flowering": False, "Fruiting": False, "Vegetative": False
                             })
             except Exception as e:
@@ -322,7 +355,12 @@ if st.sidebar.button("🗑️ Clear Entire Database"):
 #          MAIN UI: DATAFRAME
 # ==========================================
 st.title("🌱 Phenology & Climate Dataset Builder")
-st.markdown("Use the sidebar to fetch data via API or enter data manually. The pipeline will automatically gather coordinates, pull elevation, and fetch **yearly & normal climate variables** via ClimateNA before adding them to your ledger.")
+
+# Front-and-center warning for API limits
+if st.session_state.climate_limit_hit:
+    st.error("🚨 **CLIMATENA API LIMIT REACHED (50 Requests / Hour).** Data is currently being downloaded without climate variables until the timer resets.")
+else:
+    st.markdown("Use the sidebar to fetch data via API or enter data manually. The pipeline will automatically gather coordinates, pull elevation, and fetch **yearly & normal climate variables** via ClimateNA before adding them to your ledger.")
 
 df = pd.read_csv(db_file)
 
@@ -338,9 +376,19 @@ edited_df = st.data_editor(
     }
 )
 
-if st.button("💾 Save Manual Edits", type="primary"):
-    edited_df.to_csv(db_file, index=False)
-    st.success("Changes saved successfully!")
+# Added Download & Save Buttons
+col_btn1, col_btn2 = st.columns([1, 4])
+with col_btn1:
+    if st.button("💾 Save Manual Edits", type="primary"):
+        edited_df.to_csv(db_file, index=False)
+        st.success("Changes saved successfully!")
+with col_btn2:
+    st.download_button(
+        label="📥 Download Dataset (CSV)",
+        data=edited_df.to_csv(index=False).encode('utf-8'),
+        file_name="phenology_dataset.csv",
+        mime="text/csv",
+    )
 
 
 # ==========================================
@@ -354,53 +402,47 @@ if df.empty:
 else:
     plot_df = edited_df.copy()
     
-    # Ensure standard base columns are explicitly numeric
     for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
         if col in plot_df.columns:
             plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
             
-    # Ensure ALL dynamically added ClimateNA columns (Y_ and N_) are numeric for graphing
     climate_cols = [c for c in plot_df.columns if c.startswith('Y_') or c.startswith('N_')]
     for col in climate_cols:
         plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
 
-    # Dynamically grab all numeric columns for the dropdowns
     numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
-    
-    # Drop rows that have NaNs in the selected plotting columns to avoid trendline errors
     plot_df = plot_df.dropna(subset=numeric_cols)
     
     if len(numeric_cols) < 2 or len(plot_df) < 2:
         st.warning("Not enough valid numeric data to plot. Add more records to generate graphs.")
     else:
-        st.markdown("Use the dropdowns below to explore relationships between any two variables in your dataset.")
+        st.markdown("Use the dropdowns below to explore relationships. **Trendline details will display directly above the graph.**")
         
-        # Set sensible starting defaults (if they exist in the data)
         default_x_ix = numeric_cols.index('Year') if 'Year' in numeric_cols else 0
         default_y_ix = numeric_cols.index('DOY') if 'DOY' in numeric_cols else 1
         
-        # Place dropdown selectors side-by-side
         sel_col1, sel_col2 = st.columns(2)
         with sel_col1:
             selected_x = st.selectbox("Select X-Axis:", options=numeric_cols, index=default_x_ix)
         with sel_col2:
             selected_y = st.selectbox("Select Y-Axis:", options=numeric_cols, index=default_y_ix)
             
-        # Generate the dynamic scatter plot with a global trendline
+        # Graph Colored by Species, Symbolized by Data_Source
         fig_explorer = px.scatter(
             plot_df, 
             x=selected_x, 
             y=selected_y, 
             color='Species' if 'Species' in plot_df.columns else None,
+            symbol='Data_Source' if 'Data_Source' in plot_df.columns else None,
             hover_data=['Collector', 'Year', 'DOY'] if all(c in plot_df.columns for c in ['Collector', 'Year', 'DOY']) else None,
             labels={selected_x: selected_x, selected_y: selected_y},
             template="streamlit",
             title=f"{selected_y} vs. {selected_x}",
             trendline="ols",
-            trendline_scope="overall" # Calculates one trendline for all data instead of per-species
+            trendline_scope="overall" 
         )
         
-        # Extract the equation and R-squared value to place on the chart
+        # Explicitly Extract and Print the Equation UI
         try:
             results = px.get_trendline_results(fig_explorer)
             if not results.empty:
@@ -409,22 +451,12 @@ else:
                 intercept = model.params.iloc[0]
                 r2 = model.rsquared
                 
-                # Format the intercept sign nicely
                 sign = "+" if intercept >= 0 else "-"
-                eq_text = f"<b>y = {slope:.3f}x {sign} {abs(intercept):.3f}</b><br>R² = {r2:.3f}"
+                st.info(f"📈 **Overall Trendline Equation:** y = {slope:.3f}x {sign} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
                 
-                # Add a text box to the top left of the graph
-                fig_explorer.add_annotation(
-                    x=0.02, y=0.98, xref="paper", yref="paper",
-                    text=eq_text, showarrow=False,
-                    bgcolor="rgba(255, 255, 255, 0.8)",
-                    bordercolor="gray", borderwidth=1,
-                    xanchor="left", yanchor="top"
-                )
         except Exception as e:
-            # Silently pass if statsmodels is missing or data is perfectly vertical/horizontal
-            pass 
+            st.warning(f"Note: Could not calculate the trendline. Ensure 'statsmodels' library is installed, or try selecting variables with more variance.")
         
-        # Make the chart look clean and utilize the page width
+        fig_explorer.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
         fig_explorer.update_layout(margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_explorer, use_container_width=True)
