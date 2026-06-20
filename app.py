@@ -389,7 +389,16 @@ with c2:
             st.rerun()
 
     with col_dl:
-        st.download_button("📥 Download Full CSV", data=df.to_csv(index=False), file_name="full_data.csv", use_container_width=True)
+        # Pulls live from the editor and encodes to bytes to prevent truncation
+        csv_data = edited_df.to_csv(index=False).encode('utf-8')
+        
+        st.download_button(
+            label="📥 Download Full CSV", 
+            data=csv_data, 
+            file_name="herbarium_full_data.csv", 
+            mime="text/csv",
+            use_container_width=True
+        )
         
     with st.expander("⚠️ Danger Zone"):
         st.write("Wiping the database will clear your current view, but a timestamped backup will automatically be saved in your folder first.")
