@@ -448,8 +448,12 @@ with c2:
     # Generate a unique timestamp for filenames
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Generate a unique timestamp for filenames
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     with col_dl_clean:
         # Prepare a clean spreadsheet containing only the main visible tracking columns
+        clean_csv = b""
         if os.path.exists(db_file):
             try:
                 clean_df = pd.read_csv(db_file)
@@ -457,11 +461,10 @@ with c2:
                              "DOY", "Year", "Flowering", "Fruiting", "Vegetative", 
                              "Latitude", "Longitude", "Elevation", "URL"]
                 existing_main_cols = [c for c in main_cols if c in clean_df.columns]
-                clean_csv = clean_df[existing_main_cols].to_csv(index=False).encode('utf-8')
-            except Exception:
-                clean_csv = b""
-        else:
-            clean_csv = b""
+                # Using utf-8-sig ensures perfect Excel compatibility
+                clean_csv = clean_df[existing_main_cols].to_csv(index=False).encode('utf-8-sig')
+            except Exception as e:
+                st.error(f"Clean Download Error: {e}")
 
         st.download_button(
             label="📥 Download Clean Ledger", 
@@ -469,19 +472,20 @@ with c2:
             file_name=f"herbarium_clean_{current_time}.csv", 
             mime="text/csv",
             width="stretch",
+            disabled=(len(clean_csv) == 0),
             help="Downloads a lightweight sheet containing only the main columns visible in your ledger."
         )
 
     with col_dl_full:
-        # Use the exact same reliable Pandas pipeline, but keep all 500+ climate columns
+        # Prepare the full 560-column spreadsheet with explicit Excel formatting
+        full_csv_bytes = b""
         if os.path.exists(db_file):
             try:
                 full_df = pd.read_csv(db_file)
-                full_csv_bytes = full_df.to_csv(index=False).encode('utf-8')
-            except Exception:
-                full_csv_bytes = b""
-        else:
-            full_csv_bytes = b""
+                # 'utf-8-sig' forces Excel to properly map all 500+ climate columns across the screen
+                full_csv_bytes = full_df.to_csv(index=False).encode('utf-8-sig')
+            except Exception as e:
+                st.error(f"Full Download Error: {e}")
             
         st.download_button(
             label="📦 Download Full CSV (with Climate)", 
@@ -489,6 +493,7 @@ with c2:
             file_name=f"herbarium_full_{current_time}.csv", 
             mime="text/csv",
             width="stretch",
+            disabled=(len(full_csv_bytes) == 0),
             help="Downloads the complete database including all 500+ climate environment columns."
         )
         
