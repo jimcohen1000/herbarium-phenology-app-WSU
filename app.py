@@ -35,6 +35,10 @@ def safe_int(val):
     try: return int(float(val)) if pd.notna(val) and val != '' else None
     except: return None
 
+def parse_elev(val):
+    try: return float(val) if val and str(val).strip() != "" else None
+    except: return None
+
 # --- Helpers: API Fetchers & Formatting ---
 def get_elevation(lat, lon):
     try:
@@ -97,7 +101,7 @@ def thin_and_cap_data(df, target_limit, max_per_year):
 
 def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     if raw_df.empty:
-        st.sidebar.warning("No records found (or none passed the URL/duplication filters).")
+        st.sidebar.warning("No records found (or none passed the filters).")
         return
 
     st.sidebar.text(f"Applying de-clustering & year distribution...")
@@ -206,6 +210,8 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
 
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
+    
+    st.markdown("**Core Limits**")
     col_yr1, col_yr2 = st.columns(2)
     with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start_yr")
     with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end_yr")
@@ -213,17 +219,38 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     with col_lim1: g_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="g_limit_rec")
     with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="g_max_yr")
     
+    st.markdown("**Optional Geography Filters**")
+    g_states = st.text_input("State(s):", help="Comma-separated (e.g. Utah, Colorado)", key="g_states")
+    g_counties = st.text_input("County/Counties:", help="Comma-separated (e.g. Weber, Davis)", key="g_counties")
+    col_e1, col_e2 = st.columns(2)
+    with col_e1: g_emin = st.text_input("Min Elev (m):", placeholder="e.g. 1000", key="g_emin")
+    with col_e2: g_emax = st.text_input("Max Elev (m):", placeholder="e.g. 3000", key="g_emax")
+    
     if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
-        with st.spinner("Paginating GBIF... (This may take a moment to find enough valid records)"):
+        with st.spinner("Paginating GBIF... (Applying filters)"):
             spp_encoded = urllib.parse.quote(gbif_spp)
+            e_min, e_max = parse_elev(g_emin), parse_elev(g_emax)
+            
+            # Construct Base URL with Filters
+            base_url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
+            if g_states:
+                for s in g_states.split(','):
+                    if s.strip(): base_url += f"&stateProvince={urllib.parse.quote(s.strip())}"
+            if g_counties:
+                for c in g_counties.split(','):
+                    if c.strip(): base_url += f"&county={urllib.parse.quote(c.strip())}"
+            if e_min is not None or e_max is not None:
+                emin_str = str(e_min) if e_min is not None else ""
+                emax_str = str(e_max) if e_max is not None else ""
+                base_url += f"&elevation={emin_str},{emax_str}"
+
             raw_records = []
             seen_col_nums = set()
             offset = 0
             end_of_records = False
             
-            # Keep asking GBIF for pages until we have ~15x the limit, ensuring enough survive the filters
-            while len(raw_records) < (g_limit * 15) and not end_of_records and offset < 5000:
-                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit=300&offset={offset}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
+            while len(raw_records) < 3000 and not end_of_records and offset < 9000:
+                url = base_url + f"&limit=300&offset={offset}"
                 try:
                     res = requests.get(url, timeout=10)
                     if res.status_code == 200:
@@ -271,21 +298,33 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
 
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     inat_spp = st.text_input("Species Name (iNat):", key="i_spp")
+    
+    st.markdown("**Core Limits**")
     col_in1, col_in2 = st.columns(2)
     with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start_yr")
     with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end_yr")
     col_ilim1, col_ilim2 = st.columns(2)
     with col_ilim1: i_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="i_limit_rec")
     with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="i_max_yr")
+    
+    st.markdown("**Optional Geography Filters**")
+    i_states = st.text_input("State(s):", help="Comma-separated (e.g. Utah, Idaho)", key="i_states")
+    i_counties = st.text_input("County/Counties:", help="Comma-separated (e.g. Weber, Davis)", key="i_counties")
+    col_ie1, col_ie2 = st.columns(2)
+    with col_ie1: i_emin = st.text_input("Min Elev (m):", placeholder="e.g. 1000", key="i_emin")
+    with col_ie2: i_emax = st.text_input("Max Elev (m):", placeholder="e.g. 3000", key="i_emax")
         
     if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
-        with st.spinner(f"Paginating iNaturalist... (This may take a moment to find enough valid records)"):
+        with st.spinner(f"Paginating iNaturalist... (Locally filtering geography)"):
             spp_encoded = urllib.parse.quote(inat_spp)
+            e_min, e_max = parse_elev(i_emin), parse_elev(i_emax)
+            i_states_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
+            i_counties_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
+            
             raw_records = []
             page = 1
             
-            # Keep asking iNaturalist for pages until we have enough records
-            while len(raw_records) < (i_limit * 15) and page <= 10:
+            while len(raw_records) < 3000 and page <= 15:
                 url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
                 try:
                     res = requests.get(url, timeout=10)
@@ -297,8 +336,25 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                         for obs in results:
                             rec_url = obs.get('uri', '')
                             if not rec_url: continue
+                            
+                            # Geographic Text Filtering
+                            place_guess = obs.get('place_guess', '').lower()
+                            if i_states_list and not any(s in place_guess for s in i_states_list): continue
+                            if i_counties_list and not any(c in place_guess for c in i_counties_list): continue
+                            
                             if obs.get('location') and obs.get('observed_on'):
                                 lat_str, lon_str = obs['location'].split(',')
+                                lat_flt, lon_flt = float(lat_str), float(lon_str)
+                                
+                                # Elevation Ping Filtering
+                                fetched_elev = pd.NA
+                                if e_min is not None or e_max is not None:
+                                    el = get_elevation(lat_flt, lon_flt)
+                                    if el is None: continue 
+                                    if e_min is not None and el < e_min: continue
+                                    if e_max is not None and el > e_max: continue
+                                    fetched_elev = el # Save it so the pipeline doesn't have to fetch it again
+                                
                                 try:
                                     dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
                                     obs_year, obs_doy = dt.year, dt.timetuple().tm_yday
@@ -310,12 +366,12 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                     "Col_Number": "", "Barcode": str(obs.get('id', '')),
                                     "Species": obs.get('taxon', {}).get('name', inat_spp),
                                     "Year": obs_year, "DOY": obs_doy,
-                                    "Latitude": float(lat_str), "Longitude": float(lon_str), "Elevation": pd.NA,
+                                    "Latitude": lat_flt, "Longitude": lon_flt, "Elevation": fetched_elev,
                                     "URL": rec_url, "Flowering": False, "Fruiting": False, "Vegetative": False
                                 })
                         
                         if len(results) < 200: 
-                            break # We have hit the end of available iNaturalist records
+                            break 
                         page += 1
                     else:
                         break
@@ -405,6 +461,7 @@ else:
         edited_df['Species'].isin(selected_species)
     ].copy()
     
+    # Force columns to numeric if they should be
     for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
         if col in plot_df.columns:
             plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
@@ -413,11 +470,11 @@ else:
     for col in climate_cols:
         plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
 
+    # Find all numeric columns available for the dropdowns
     numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
-    plot_df = plot_df.dropna(subset=numeric_cols)
     
-    if len(numeric_cols) < 2 or len(plot_df) < 2:
-        st.warning("Not enough valid numeric data to plot based on your current filters.")
+    if len(numeric_cols) < 2 or len(plot_df) < 1:
+        st.warning("Not enough numeric columns available in the dataset to plot.")
     else:
         default_x_ix = numeric_cols.index('Year') if 'Year' in numeric_cols else 0
         default_y_ix = numeric_cols.index('DOY') if 'DOY' in numeric_cols else 1
@@ -425,41 +482,47 @@ else:
         sel_col1, sel_col2 = st.columns(2)
         with sel_col1: selected_x = st.selectbox("Select X-Axis:", options=numeric_cols, index=default_x_ix)
         with sel_col2: selected_y = st.selectbox("Select Y-Axis:", options=numeric_cols, index=default_y_ix)
-            
-        fig_explorer = px.scatter(
-            plot_df, 
-            x=selected_x, 
-            y=selected_y, 
-            color='Species' if 'Species' in plot_df.columns else None,
-            symbol='Data_Source' if 'Data_Source' in plot_df.columns else None,
-            hover_data=['Collector', 'Year', 'DOY'] if all(c in plot_df.columns for c in ['Collector', 'Year', 'DOY']) else None,
-            labels={selected_x: selected_x, selected_y: selected_y},
-            template="streamlit",
-            title=f"{selected_y} vs. {selected_x}"
-        )
         
-        x_vals = plot_df[selected_x].values
-        y_vals = plot_df[selected_y].values
+        # ONLY drop rows where the selected X or Y is missing, saving the rest of the dataset!
+        valid_plot_df = plot_df.dropna(subset=[selected_x, selected_y])
         
-        if np.var(x_vals) > 0 and np.var(y_vals) > 0:
-            slope, intercept = np.polyfit(x_vals, y_vals, 1)
-            r_matrix = np.corrcoef(x_vals, y_vals)
-            r2 = r_matrix[0, 1]**2
-            
-            line_x = np.array([min(x_vals), max(x_vals)])
-            line_y = slope * line_x + intercept
-            
-            fig_explorer.add_scatter(
-                x=line_x, y=line_y, mode='lines', 
-                name='Filtered Trend', 
-                line=dict(color='black', dash='dash')
+        if len(valid_plot_df) < 2:
+            st.warning(f"Not enough valid data points have both {selected_x} and {selected_y} values to plot a trend.")
+        else:
+            fig_explorer = px.scatter(
+                valid_plot_df, 
+                x=selected_x, 
+                y=selected_y, 
+                color='Species' if 'Species' in valid_plot_df.columns else None,
+                symbol='Data_Source' if 'Data_Source' in valid_plot_df.columns else None,
+                hover_data=['Collector', 'Year', 'DOY'] if all(c in valid_plot_df.columns for c in ['Collector', 'Year', 'DOY']) else None,
+                labels={selected_x: selected_x, selected_y: selected_y},
+                template="streamlit",
+                title=f"{selected_y} vs. {selected_x}"
             )
             
-            sign = "+" if intercept >= 0 else "-"
-            st.info(f"📈 **Filtered Trendline Equation:** y = {slope:.3f}x {sign} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
-        else:
-            st.warning("Not enough variance in selected variables to calculate a trendline.")
-        
-        fig_explorer.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
-        fig_explorer.update_layout(margin=dict(l=20, r=20, t=40, b=20))
-        st.plotly_chart(fig_explorer, use_container_width=True)
+            x_vals = valid_plot_df[selected_x].values
+            y_vals = valid_plot_df[selected_y].values
+            
+            if np.var(x_vals) > 0 and np.var(y_vals) > 0:
+                slope, intercept = np.polyfit(x_vals, y_vals, 1)
+                r_matrix = np.corrcoef(x_vals, y_vals)
+                r2 = r_matrix[0, 1]**2
+                
+                line_x = np.array([min(x_vals), max(x_vals)])
+                line_y = slope * line_x + intercept
+                
+                fig_explorer.add_scatter(
+                    x=line_x, y=line_y, mode='lines', 
+                    name='Filtered Trend', 
+                    line=dict(color='black', dash='dash')
+                )
+                
+                sign = "+" if intercept >= 0 else "-"
+                st.info(f"📈 **Filtered Trendline Equation:** y = {slope:.3f}x {sign} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
+            else:
+                st.warning("Not enough variance in selected variables to calculate a trendline.")
+            
+            fig_explorer.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
+            fig_explorer.update_layout(margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig_explorer, use_container_width=True)
