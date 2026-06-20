@@ -2,23 +2,54 @@ import streamlit as st
 import pandas as pd
 import os
 import time
-from datetime import datetime
+import requests
+import random
+from datetime import datetime, date
 import plotly.express as px
 
 # --- CONFIGURATION & SETUP ---
 st.set_page_config(layout="wide", page_title="Herbarium Climate Ledger")
 db_file = "herbarium_database.csv"
 
-# Base tracker headers before climate expansion
 base_headers = [
     "Data_Source", "Collector", "Col_Number", "Barcode", "Species", 
     "DOY", "Year", "Flowering", "Fruiting", "Vegetative", 
     "Latitude", "Longitude", "Elevation", "URL"
 ]
 
-# Initialize database if it doesn't exist
 if not os.path.exists(db_file):
     pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
+
+
+# ==========================================
+#         API FETCHING HELPERS
+# ==========================================
+
+def get_elevation(lat, lon):
+    try:
+        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            elevations = res.json().get('elevation')
+            if elevations and len(elevations) > 0:
+                return float(elevations[0])
+    except Exception:
+        pass
+    return None
+
+def get_climate_data(lat, lon, el, prd):
+    if el is None: 
+        return {} 
+    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            return data[0] if isinstance(data, list) else data
+    except Exception:
+        pass
+    return {}
 
 
 # ==========================================
@@ -26,9 +57,7 @@ if not os.path.exists(db_file):
 # ==========================================
 
 def remove_duplicate_collections(df):
-    """Drops duplicate sheets from identical collecting actions."""
-    if df.empty:
-        return df
+    if df.empty: return df
     df = df.copy()
     if 'Col_Number' in df.columns:
         df['Col_Number'] = df['Col_Number'].astype(str).replace(['nan', 'None', '<NA>', ''], pd.NA)
@@ -39,38 +68,78 @@ def remove_duplicate_collections(df):
         df = pd.concat([clean_has_col, no_col_num], ignore_index=True)
     return df
 
-
 def thin_data_by_year(df, max_per_year=3):
-    """Randomly thins dataset to pull maximum of `max_per_year` specimens per year."""
-    if df.empty or 'Year' not in df.columns:
-        return df
+    if df.empty or 'Year' not in df.columns: return df
     df = df.copy()
     df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
     has_year = df[df['Year'].notna()].copy()
     no_year = df[df['Year'].isna()]
     has_year['Year'] = has_year['Year'].astype(int)
-    
     thinned_has_year = has_year.groupby('Year', group_keys=False).apply(
         lambda x: x.sample(n=min(len(x), max_per_year), random_state=42)
     )
     return pd.concat([thinned_has_year, no_year], ignore_index=True)
 
-
-def pipeline_clean_and_save(new_raw_df):
-    """Cleans inbound rows and writes directly to the master ledger file."""
+def pipeline_clean_and_fetch_climate(new_raw_df):
+    """Filters duplicates, limits by year, THEN fetches climate data for the survivors."""
     if new_raw_df.empty:
         st.sidebar.warning("No data found to process.")
         return
 
+    st.sidebar.text("Cleaning duplicates & thinning years...")
     cleaned_df = remove_duplicate_collections(new_raw_df)
     cleaned_df = thin_data_by_year(cleaned_df, max_per_year=3)
     
-    master_df = pd.read_csv(db_file)
-    combined_df = pd.concat([master_df, cleaned_df], ignore_index=True)
-    combined_df.to_csv(db_file, index=False)
-    st.sidebar.success(f"Successfully processed and added {len(cleaned_df)} filtered rows!")
-    time.sleep(1.2)
-    st.rerun()
+    records = []
+    api_limit_hit = False
+    progress_bar = st.sidebar.progress(0)
+    status_text = st.sidebar.empty()
+    
+    for i, row in cleaned_df.iterrows():
+        if api_limit_hit: break
+        
+        row_dict = row.to_dict()
+        lat, lon = row_dict.get('Latitude'), row_dict.get('Longitude')
+        year, el = row_dict.get('Year'), row_dict.get('Elevation')
+        
+        if pd.notna(lat) and pd.notna(lon) and pd.notna(year):
+            # 1. Fetch Elevation if missing
+            if pd.isna(el) or el == "" or el == 0:
+                status_text.text(f"Fetching elevation... ({i+1}/{len(cleaned_df)})")
+                el = get_elevation(lat, lon)
+                row_dict['Elevation'] = el
+            
+            # 2. Fetch Climate Data
+            if el is not None:
+                status_text.text(f"Fetching ClimateNA for {int(year)}... ({i+1}/{len(cleaned_df)})")
+                year_data = get_climate_data(lat, lon, el, f"Year_{int(year)}")
+                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                
+                if not year_data and not norm_data:
+                    st.sidebar.warning("ClimateNA API limit reached! Saving partial batch.")
+                    api_limit_hit = True
+                    break
+                
+                for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
+                for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
+                
+        records.append(row_dict)
+        progress_bar.progress((i + 1) / len(cleaned_df))
+        
+    status_text.text("Finished processing pipeline!")
+    if records:
+        final_new_df = pd.DataFrame(records)
+        master_df = pd.read_csv(db_file)
+        combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
+        
+        # Sort columns to keep base headers first
+        new_order = [c for c in base_headers if c in combined_df.columns]
+        new_order += [c for c in combined_df.columns if c not in new_order]
+        
+        combined_df[new_order].to_csv(db_file, index=False)
+        st.sidebar.success(f"Added {len(records)} fully processed climate records!")
+        time.sleep(1.5)
+        st.rerun()
 
 
 # ==========================================
@@ -79,78 +148,117 @@ def pipeline_clean_and_save(new_raw_df):
 with st.sidebar:
     st.title("📥 Data Entry")
     
+    # --- GBIF REAL API LOGIC ---
     with st.expander("🌐 Fetch from GBIF", expanded=False):
-        species_input = st.text_input("Taxon/Species Name:", placeholder="e.g., Lithospermum ruderale", key="gbif_spp")
+        gbif_spp = st.text_input("Species Name (GBIF):", placeholder="e.g., Anemone patens")
         col_yr1, col_yr2 = st.columns(2)
-        with col_yr1:
-            start_year = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="gbif_start")
-        with col_yr2:
-            end_year = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="gbif_end")
-        limit = st.number_input("Download Record Limit:", min_value=10, max_value=1000, value=100, step=10, key="gbif_limit")
+        with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start")
+        with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end")
+        g_limit = st.number_input("GBIF Record Limit:", min_value=5, max_value=200, value=25, step=5)
         
         if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
             with st.spinner("Querying GBIF..."):
-                # --- YOUR GBIF RETRIEVAL WRAPPER PLUGGED IN HERE ---
-                raw_fetched_df = pd.DataFrame([{
-                    "Data_Source": "GBIF", "Collector": "A. Gray", "Col_Number": "4021", 
-                    "Species": species_input, "Year": int((start_year + end_year)/2), 
-                    "Latitude": 44.5, "Longitude": -112.3, "DOY": 155, "Flowering": True
-                }])
-                pipeline_clean_and_save(raw_fetched_df)
+                raw_records = []
+                available_years = list(range(int(g_start), int(g_end) + 1))
+                random_years = random.choices(available_years, k=g_limit * 4)
+                
+                for y in random_years:
+                    if len(raw_records) >= g_limit: break
+                    url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&year={y}&decimalLatitude=15,83&decimalLongitude=-170,-50&limit=5"
+                    try:
+                        res = requests.get(url, timeout=5)
+                        if res.status_code == 200:
+                            data = res.json().get('results', [])
+                            for obs in data:
+                                if len(raw_records) >= g_limit: break
+                                rec_url = obs.get('references', '')
+                                if not rec_url and obs.get('media'): rec_url = obs.get('media')[0].get('identifier', '')
+                                
+                                raw_records.append({
+                                    "Data_Source": "Digitized Herbarium",
+                                    "Collector": obs.get('recordedBy', ''),
+                                    "Col_Number": obs.get('recordNumber', ''),
+                                    "Barcode": obs.get('catalogNumber', ''),
+                                    "Species": obs.get('species', gbif_spp),
+                                    "Year": int(obs.get('year', y)),
+                                    "DOY": datetime(int(obs.get('year', y)), int(obs.get('month', 1)), int(obs.get('day', 1))).timetuple().tm_yday if obs.get('month') and obs.get('day') else pd.NA,
+                                    "Latitude": obs.get('decimalLatitude'),
+                                    "Longitude": obs.get('decimalLongitude'),
+                                    "Elevation": obs.get('elevation', pd.NA),
+                                    "URL": rec_url,
+                                    "Flowering": False, "Fruiting": False, "Vegetative": False
+                                })
+                    except Exception: pass
+                pipeline_clean_and_fetch_climate(pd.DataFrame(raw_records))
 
+    # --- INATURALIST REAL API LOGIC ---
     with st.expander("📸 Fetch from iNaturalist", expanded=False):
-        species_input_inat = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale", key="inat_spp")
+        inat_spp = st.text_input("Species Name (iNat):", placeholder="e.g., Anemone patens")
         col_in1, col_in2 = st.columns(2)
-        with col_in1:
-            start_yr_inat = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="inat_start")
-        with col_in2:
-            end_yr_inat = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="inat_end")
-        limit_inat = st.number_input("Download Record Limit:", min_value=10, max_value=1000, value=100, step=10, key="inat_limit")
+        with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start")
+        with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end")
+        i_limit = st.number_input("iNat Record Limit:", min_value=5, max_value=200, value=25, step=5)
             
         if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
-            with st.spinner(f"Downloading up to {limit_inat} observations..."):
-                # --- YOUR iNATURALIST RETRIEVAL WRAPPER PLUGGED IN HERE ---
-                raw_fetched_df = pd.DataFrame([{
-                    "Data_Source": "iNaturalist", "Collector": "CitizenSci_User", "Col_Number": "", 
-                    "Species": species_input_inat, "Year": int((start_yr_inat + end_yr_inat)/2), 
-                    "Latitude": 40.65, "Longitude": -111.65, "DOY": 178, "Fruiting": True
-                }])
-                pipeline_clean_and_save(raw_fetched_df)
+            with st.spinner(f"Downloading up to {i_limit} observations..."):
+                raw_records = []
+                available_years = list(range(int(i_start), int(i_end) + 1))
+                random_years = random.choices(available_years, k=i_limit * 4)
+                
+                for y in random_years:
+                    if len(raw_records) >= i_limit: break
+                    url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&d1={y}-01-01&d2={y}-12-31&nelat=83&nelng=-50&swlat=15&swlng=-170&per_page=5"
+                    try:
+                        res = requests.get(url, timeout=5)
+                        if res.status_code == 200:
+                            data = res.json().get('results', [])
+                            for obs in data:
+                                if len(raw_records) >= i_limit: break
+                                if obs.get('location') and obs.get('observed_on'):
+                                    lat_str, lon_str = obs['location'].split(',')
+                                    dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
+                                    raw_records.append({
+                                        "Data_Source": "iNaturalist",
+                                        "Collector": obs.get('user', {}).get('login', ''),
+                                        "Species": obs.get('taxon', {}).get('name', inat_spp),
+                                        "Year": dt.year, "DOY": dt.timetuple().tm_yday,
+                                        "Latitude": float(lat_str), "Longitude": float(lon_str),
+                                        "Elevation": pd.NA,
+                                        "URL": obs.get('uri', ""),
+                                        "Flowering": False, "Fruiting": False, "Vegetative": False
+                                    })
+                    except Exception: pass
+                pipeline_clean_and_fetch_climate(pd.DataFrame(raw_records))
 
+    # --- MANUAL ENTRY FORM ---
     with st.expander("✍️ Manual Data Entry", expanded=False):
         m_species = st.text_input("Species Name:", placeholder="e.g., Quercus alba")
         m_collector = st.text_input("Collector's Name:")
         m_col_num = st.text_input("Collection Number / Sheet ID:")
         m_barcode = st.text_input("Barcode Number:")
         col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            m_year = st.number_input("Collection Year:", min_value=1700, max_value=2026, value=2026)
-        with col_m2:
-            m_doy = st.number_input("Day of Year (DOY):", min_value=1, max_value=366, value=150)
+        with col_m1: m_year = st.number_input("Collection Year:", min_value=1700, max_value=2026, value=2026)
+        with col_m2: m_doy = st.number_input("Day of Year (DOY):", min_value=1, max_value=366, value=150)
         col_m3, col_m4, col_m5 = st.columns(3)
-        with col_m3:
-            m_lat = st.number_input("Latitude (°N):", format="%.5f", value=40.0)
-        with col_m4:
-            m_lon = st.number_input("Longitude (°W):", format="%.5f", value=-111.0)
-        with col_m5:
-            m_elev = st.number_input("Elevation (m):", value=0)
+        with col_m3: m_lat = st.number_input("Latitude (°N):", format="%.5f", value=40.0)
+        with col_m4: m_lon = st.number_input("Longitude (°W):", format="%.5f", value=-111.0)
+        with col_m5: m_elev = st.number_input("Elevation (m):", value=0)
         m_url = st.text_input("Image/Record URL:")
         col_p1, col_p2, col_p3 = st.columns(3)
-        with col_p1:
-            m_flowering = st.checkbox("Flowering")
-        with col_p2:
-            m_fruiting = st.checkbox("Fruiting")
-        with col_p3:
-            m_vegetative = st.checkbox("Vegetative")
+        with col_p1: m_flowering = st.checkbox("Flowering")
+        with col_p2: m_fruiting = st.checkbox("Fruiting")
+        with col_p3: m_vegetative = st.checkbox("Vegetative")
 
         if st.button("Commit Manual Record", type="primary", use_container_width=True):
             new_row_df = pd.DataFrame([{
                 "Data_Source": "Manual_Entry", "Collector": m_collector, "Col_Number": m_col_num,
                 "Barcode": m_barcode, "Species": m_species, "DOY": m_doy, "Year": m_year,
                 "Flowering": m_flowering, "Fruiting": m_fruiting, "Vegetative": m_vegetative,
-                "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev, "URL": m_url
+                "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev if m_elev != 0 else pd.NA, 
+                "URL": m_url
             }])
-            pipeline_clean_and_save(new_row_df)
+            # Passing it to the pipeline automatically fetches its climate/elevation!
+            pipeline_clean_and_fetch_climate(new_row_df)
 
     st.markdown("---")
     st.title("💾 Export Database")
@@ -165,23 +273,8 @@ with st.sidebar:
         clean_csv = df_export[existing_main_cols].to_csv(index=False).encode('utf-8-sig')
         full_csv_bytes = df_export.to_csv(index=False).encode('utf-8-sig')
         
-    st.download_button(
-        label="📥 Download Clean Ledger", 
-        data=clean_csv, 
-        file_name=f"herbarium_clean_{current_time}.csv", 
-        mime="text/csv", 
-        use_container_width=True, 
-        disabled=(len(clean_csv)==0)
-    )
-
-    st.download_button(
-        label="📦 Download Full CSV", 
-        data=full_csv_bytes, 
-        file_name=f"herbarium_full_{current_time}.csv", 
-        mime="text/csv", 
-        use_container_width=True, 
-        disabled=(len(full_csv_bytes)==0)
-    )
+    st.download_button("📥 Download Clean Ledger", data=clean_csv, file_name=f"herbarium_clean_{current_time}.csv", mime="text/csv", use_container_width=True, disabled=(len(clean_csv)==0))
+    st.download_button("📦 Download Full CSV", data=full_csv_bytes, file_name=f"herbarium_full_{current_time}.csv", mime="text/csv", use_container_width=True, disabled=(len(full_csv_bytes)==0))
     
     st.markdown("---")
     with st.expander("⚠️ Danger Zone"):
@@ -201,25 +294,15 @@ st.title("🌱 Herbarium Specimen Tracker")
 
 df = pd.read_csv(db_file)
 
-# --- ENHANCED TYPE SAFETY FIX FOR STREAMLIT DATA EDITOR ---
+# --- TYPE SAFETY FIX FOR STREAMLIT ---
 if not df.empty:
-    # 1. Drop totally blank "ghost" rows from the bottom of the CSV
     df = df.dropna(how='all')
-    
-    # 2. Checkbox columns MUST be Booleans (No NaN)
     for col in ["Flowering", "Fruiting", "Vegetative"]:
-        if col in df.columns:
-            df[col] = df[col].fillna(False).astype(bool)
-
-    # 3. Number columns MUST be numeric
+        if col in df.columns: df[col] = df[col].fillna(False).astype(bool)
     for col in ["Year", "DOY", "Latitude", "Longitude", "Elevation"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-    # 4. Text & Link columns MUST be strings (No NaN floats allowed)
+        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
     for col in ["Data_Source", "URL", "Species", "Collector", "Barcode", "Col_Number"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
+        if col in df.columns: df[col] = df[col].fillna("").astype(str)
 
 st.subheader("📋 Database Ledger")
 if not df.empty:
@@ -251,7 +334,6 @@ with col_save:
         time.sleep(1)
         st.rerun()
 
-
 # ==========================================
 #          GRAPHING & TRENDS DASHBOARD
 # ==========================================
@@ -267,7 +349,6 @@ else:
     plot_df['Latitude'] = pd.to_numeric(plot_df['Latitude'], errors='coerce')
     
     if 'Y_MAT' not in plot_df.columns:
-        plot_df['Y_MAT'] = 12.5 + (plot_df['Year'] - 2000) * 0.04
         has_climate_data = False
     else:
         plot_df['Y_MAT'] = pd.to_numeric(plot_df['Y_MAT'], errors='coerce')
@@ -280,16 +361,17 @@ else:
         
         with fig_col1:
             st.markdown("**Chronological Trend: Mean Annual Temp vs. Collection Year**")
-            yearly_summary = plot_df.groupby('Year')['Y_MAT'].mean().reset_index()
-            fig_temp = px.line(
-                yearly_summary, x='Year', y='Y_MAT', 
-                labels={'Y_MAT': 'Mean Annual Temp (°C)', 'Year': 'Collection Year'},
-                markers=True, template="streamlit"
-            )
-            fig_temp.update_layout(margin=dict(l=20, r=20, t=10, b=20))
-            st.plotly_chart(fig_temp, use_container_width=True)
-            if not has_climate_data:
-                st.caption("💡 *Note: Showing temporary trends. Run climate data processing scripts to generate explicit 'Y_MAT' rows.*")
+            if has_climate_data:
+                yearly_summary = plot_df.groupby('Year')['Y_MAT'].mean().reset_index()
+                fig_temp = px.line(
+                    yearly_summary, x='Year', y='Y_MAT', 
+                    labels={'Y_MAT': 'Mean Annual Temp (°C)', 'Year': 'Collection Year'},
+                    markers=True, template="streamlit"
+                )
+                fig_temp.update_layout(margin=dict(l=20, r=20, t=10, b=20))
+                st.plotly_chart(fig_temp, use_container_width=True)
+            else:
+                st.warning("No ClimateNA data found yet. Fetch records to generate this graph.")
 
         with fig_col2:
             st.markdown("**Phenological Profile: Collection Day of Year vs. Latitude**")
@@ -301,5 +383,3 @@ else:
             )
             fig_pheno.update_layout(margin=dict(l=20, r=20, t=10, b=20))
             st.plotly_chart(fig_pheno, use_container_width=True)
-    else:
-        st.warning("Ensure rows possess valid values for Year and DOY markers to construct figures.")
