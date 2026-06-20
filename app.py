@@ -116,73 +116,90 @@ with c1:
             inat_spp = st.text_input("Target Species", "Anemone patens")
             
             col_d1, col_d2 = st.columns(2)
-            with col_d1: d1 = st.date_input("Start Date", value=date(2000, 1, 1))
+            with col_d1: d1 = st.date_input("Start Date", value=date(1950, 1, 1))
             with col_d2: d2 = st.date_input("End Date", value=date(2022, 12, 31))
             
             inat_limit = st.slider("Records to Fetch", 5, 50, 25, step=5)
-            st.info("Pulls Location -> Calculates Elevation -> Fetches ClimateNA models.")
+            st.info("Randomly samples years in range -> Pulls Location -> Calculates Elev -> Fetches ClimateNA.")
             
             inat_submitted = st.form_submit_button("📥 FETCH iNATURALIST", type="primary", use_container_width=True)
             
         if inat_submitted:
             records = []
-            url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&per_page={inat_limit}&d1={d1}&d2={d2}"
             
-            st.write(f"Contacting iNaturalist for {inat_limit} records...")
-            res = requests.get(url, timeout=15)
+            # Generate and shuffle years just like GBIF
+            available_years = list(range(d1.year, d2.year + 1))
+            random_years = random.choices(available_years, k=inat_limit * 3)
             
-            if res.status_code == 200:
-                data = res.json().get('results', [])
-                if data:
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    for i, obs in enumerate(data):
-                        if obs.get('location') and obs.get('observed_on'):
-                            lat_str, lon_str = obs['location'].split(',')
-                            try:
-                                dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
-                                lat, lon = float(lat_str), float(lon_str)
-                                
-                                status_text.text(f"Processing {i+1}/{len(data)}: Finding elevation...")
-                                el = get_elevation(lat, lon)
-                                
-                                row = {
-                                    "Data_Source": "iNaturalist",
-                                    "Species": obs.get('taxon', {}).get('name', inat_spp),
-                                    "Latitude": lat, "Longitude": lon, "Elevation": el,
-                                    "Year": dt.year, "DOY": dt.timetuple().tm_yday,
-                                    "Flowering": False, "Fruiting": False, "Vegetative": False,
-                                    "URL": obs.get('uri', "")
-                                }
-                                
-                                if el is not None:
-                                    status_text.text(f"Processing {i+1}/{len(data)}: Pulling climate models...")
-                                    year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
-                                    norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
-                                    for k, v in year_data.items(): row[f"Y_{k}"] = v
-                                    for k, v in norm_data.items(): row[f"N_{k}"] = v
-                                
-                                records.append(row)
-                            except Exception:
-                                pass
-                        progress_bar.progress((i + 1) / len(data))
-                    
-                    status_text.text("Finished processing!")
-                    if records:
+            st.write(f"Contacting iNaturalist for {inat_limit} randomized records...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            collected_data = []
+            
+            for y in random_years:
+                if len(collected_data) >= inat_limit:
+                    break
+                
+                # Fetch up to 2 records for this random year
+                url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&d1={y}-01-01&d2={y}-12-31&per_page=2"
+                try:
+                    res = requests.get(url, timeout=5)
+                    if res.status_code == 200:
+                        data = res.json().get('results', [])
+                        if data:
+                            obs = random.choice(data)
+                            if obs.get('id') not in [d.get('id') for d in collected_data]:
+                                collected_data.append(obs)
+                                status_text.text(f"Found record from {y}... ({len(collected_data)}/{inat_limit})")
+                except Exception:
+                    pass
+            
+            if collected_data:
+                for i, obs in enumerate(collected_data):
+                    if obs.get('location') and obs.get('observed_on'):
+                        lat_str, lon_str = obs['location'].split(',')
                         try:
-                            df_existing = pd.read_csv(db_file)
+                            dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
+                            lat, lon = float(lat_str), float(lon_str)
+                            
+                            status_text.text(f"Processing {i+1}/{len(collected_data)}: Finding elevation...")
+                            el = get_elevation(lat, lon)
+                            
+                            row = {
+                                "Data_Source": "iNaturalist",
+                                "Species": obs.get('taxon', {}).get('name', inat_spp),
+                                "Latitude": lat, "Longitude": lon, "Elevation": el,
+                                "Year": dt.year, "DOY": dt.timetuple().tm_yday,
+                                "Flowering": False, "Fruiting": False, "Vegetative": False,
+                                "URL": obs.get('uri', "")
+                            }
+                            
+                            if el is not None:
+                                status_text.text(f"Processing {i+1}/{len(collected_data)}: Pulling climate models...")
+                                year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
+                                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                                for k, v in year_data.items(): row[f"Y_{k}"] = v
+                                for k, v in norm_data.items(): row[f"N_{k}"] = v
+                            
+                            records.append(row)
                         except Exception:
-                            df_existing = pd.DataFrame(columns=base_headers)
-                        df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
-                        save_with_ordered_columns(df_combined, db_file)
-                        st.success(f"Added {len(records)} iNaturalist records!")
-                        time.sleep(1)
-                        st.rerun()
-                else:
-                    st.warning("No records found.")
+                            pass
+                    progress_bar.progress((i + 1) / len(collected_data))
+                
+                status_text.text("Finished processing!")
+                if records:
+                    try:
+                        df_existing = pd.read_csv(db_file)
+                    except Exception:
+                        df_existing = pd.DataFrame(columns=base_headers)
+                    df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
+                    save_with_ordered_columns(df_combined, db_file)
+                    st.success(f"Added {len(records)} temporally randomized iNaturalist records!")
+                    time.sleep(1)
+                    st.rerun()
             else:
-                st.error("Failed to connect to iNaturalist.")
+                st.warning("Could not find enough iNaturalist records for those randomized years.")
 
     # --- TAB 3: DIGITAL HERBARIA (GBIF) BATCH IMPORT ---
     with tab3:
@@ -191,7 +208,6 @@ with c1:
             gbif_spp = st.text_input("Target Species", "Anemone patens", key="g_spp")
             
             col_g1, col_g2 = st.columns(2)
-            # Default changed to 1900
             with col_g1: g_d1 = st.date_input("Start Date", value=date(1900, 1, 1), key="g_d1")
             with col_g2: g_d2 = st.date_input("End Date", value=date(2022, 12, 31), key="g_d2")
             
@@ -202,41 +218,31 @@ with c1:
             
         if gbif_submitted:
             records = []
-            
-            # Generate a list of years and shuffle them to get a random representation
             available_years = list(range(g_d1.year, g_d2.year + 1))
-            
-            # Draw plenty of random years (with replacement) in case some years have no data
             random_years = random.choices(available_years, k=gbif_limit * 3)
             
             st.write(f"Scouting global databases for {gbif_limit} randomized records...")
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
             collected_data = []
             
             for y in random_years:
                 if len(collected_data) >= gbif_limit:
                     break
                 
-                # Fetch 2 records max for this random year to keep variation high
                 url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&year={y}&limit=2"
                 try:
                     res = requests.get(url, timeout=5)
                     if res.status_code == 200:
                         data = res.json().get('results', [])
                         if data:
-                            # Pick one random record from the results for this year
                             obs = random.choice(data)
-                            
-                            # Make sure it's not a duplicate based on key
                             if obs.get('key') not in [d.get('key') for d in collected_data]:
                                 collected_data.append(obs)
                                 status_text.text(f"Found record from {y}... ({len(collected_data)}/{gbif_limit})")
                 except Exception:
                     pass
             
-            # Now process the gathered, randomized records
             if collected_data:
                 for i, obs in enumerate(collected_data):
                     y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
@@ -293,7 +299,7 @@ with c1:
                     time.sleep(1.5)
                     st.rerun()
             else:
-                st.warning("Could not find enough digital herbarium records with images & coordinates for those randomized years.")
+                st.warning("Could not find enough digital herbarium records for those randomized years.")
 
 # Column 2: Graphing & Database
 with c2:
