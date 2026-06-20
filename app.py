@@ -48,6 +48,16 @@ def parse_elev(val):
     try: return float(val) if val and str(val).strip() != "" else None
     except: return None
 
+def ensure_url_scheme(url_str):
+    if not url_str or pd.isna(url_str):
+        return ""
+    url_str = str(url_str).strip()
+    if url_str == "Manual":
+        return url_str
+    if not url_str.startswith(('http://', 'https://')):
+        return 'https://' + url_str
+    return url_str
+
 def calc_prior_3_months(year, doy):
     try:
         dt = datetime(year, 1, 1) + pd.Timedelta(days=doy-1)
@@ -146,7 +156,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 row_dict['Elevation'] = el
             
             if year is not None:
-                # Capped to 2021 due to lag in ClimateNA API historical year availability
                 climate_year = min(year, 2021) 
                 status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                 
@@ -277,6 +286,10 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                         for obs in results:
                             rec_url = obs.get('references', '') or (obs.get('media')[0].get('identifier', '') if obs.get('media') else '')
                             if not rec_url: continue
+                            
+                            # Clean and ensure URL has proper scheme
+                            rec_url = ensure_url_scheme(rec_url)
+                            
                             y = obs.get('year') or (int(obs['eventDate'][:4]) if obs.get('eventDate') else None)
                             m, d = obs.get('month'), obs.get('day')
                             doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday if y and m and d else pd.NA
@@ -321,7 +334,6 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
-            # THE FIX IS RIGHT HERE: changed '1' to '[]'
             raw_records, page = [], 1
             while len(raw_records) < 3000 and page <= 15:
                 try:
@@ -333,6 +345,10 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                         for obs in results:
                             rec_url = obs.get('uri', '')
                             if not rec_url: continue
+                            
+                            # Clean and ensure URL has proper scheme
+                            rec_url = ensure_url_scheme(rec_url)
+                            
                             pg = obs.get('place_guess', '').lower()
                             if s_list and not any(s in pg for s in s_list): continue
                             if c_list and not any(c in pg for c in c_list): continue
@@ -505,7 +521,15 @@ with tab4:
         
         row = df.loc[target_idx]
         
-        st.link_button("🔗 Click Here to View Original Specimen Image/Page", row['URL'], type="primary", use_container_width=True)
+        # Pull and sanitize the URL for the button
+        safe_url = ensure_url_scheme(row['URL'])
+        
+        st.link_button("🔗 Click Here to View Original Specimen Image/Page", safe_url, type="primary", use_container_width=True)
+        
+        # New fallback block just in case the button gets blocked by a browser setting
+        st.caption("If the button above does not work, copy and paste this link into your browser:")
+        st.code(safe_url, language="text")
+        
         st.write("---")
         
         c_s1, c_s2, c_s3 = st.columns(3)
