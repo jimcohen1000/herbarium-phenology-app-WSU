@@ -40,7 +40,7 @@ def get_elevation(lat, lon):
 def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None: 
         return {} 
-    base = "http://api.climatena.ca/api/cnaApi6/LatLonEl"
+    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
         res = requests.get(url, timeout=10)
@@ -83,7 +83,7 @@ def thin_and_cap_data(df, target_limit, max_per_year=3):
         
         has_year['Year'] = has_year['Year'].astype(int)
         thinned = has_year.groupby('Year', group_keys=False).apply(
-            lambda x: x.sample(n=min(len(x), max_per_year), random_state=42)
+            lambda x: x.sample(n=min(len(x), max_per_year))
         )
         df = pd.concat([thinned, no_year], ignore_index=True)
         
@@ -98,46 +98,53 @@ def pipeline_enrich_and_save(raw_df, target_limit):
     st.sidebar.text("Applying de-clustering filters...")
     cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=3)
     
+    records = []
     progress_bar = st.sidebar.progress(0)
     status_text = st.sidebar.empty()
     
     # Fetch Elevation and Climate NA for the surviving records
     for i, row in cleaned_df.iterrows():
-        lat, lon = row.get('Latitude'), row.get('Longitude')
-        year, el = row.get('Year'), row.get('Elevation')
+        # REVERTED FIX: Building a dictionary is strictly safer for dynamic pandas columns
+        row_dict = row.to_dict()
+        lat, lon = row_dict.get('Latitude'), row_dict.get('Longitude')
+        year, el = row_dict.get('Year'), row_dict.get('Elevation')
         
         if pd.notna(lat) and pd.notna(lon) and pd.notna(year):
             # 1. Fetch Elevation if missing
-            if pd.isna(el) or el == "" or el == 0:
+            if pd.isna(el) or el == "" or el == 0 or el == 0.0:
                 status_text.text(f"Fetching elevation... ({i+1}/{len(cleaned_df)})")
                 el = get_elevation(lat, lon)
-                cleaned_df.at[i, 'Elevation'] = el
+                row_dict['Elevation'] = el
             
             # 2. Fetch Climate Data
-            if pd.notna(el):
+            if el is not None and not pd.isna(el):
                 status_text.text(f"Fetching ClimateNA for {int(year)}... ({i+1}/{len(cleaned_df)})")
                 year_data = get_climate_data(lat, lon, el, f"Year_{int(year)}")
                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                 
-                for k, v in year_data.items(): cleaned_df.at[i, f"Y_{k}"] = v
-                for k, v in norm_data.items(): cleaned_df.at[i, f"N_{k}"] = v
+                # Append new columns to the dictionary 
+                for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
+                for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
                 
+        records.append(row_dict)
         progress_bar.progress((i + 1) / len(cleaned_df))
         
     status_text.text("Finished processing pipeline!")
     
     # Save to master database
-    master_df = pd.read_csv(db_file)
-    combined_df = pd.concat([master_df, cleaned_df], ignore_index=True)
-    
-    # Ensure base tracking columns stay on the left side
-    new_order = [c for c in base_headers if c in combined_df.columns]
-    new_order += [c for c in combined_df.columns if c not in new_order]
-    
-    combined_df[new_order].to_csv(db_file, index=False)
-    st.sidebar.success(f"Added {len(cleaned_df)} fully processed climate records!")
-    time.sleep(1.5)
-    st.rerun()
+    if records:
+        final_new_df = pd.DataFrame(records)
+        master_df = pd.read_csv(db_file)
+        combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
+        
+        # Ensure base tracking columns stay on the left side
+        new_order = [c for c in base_headers if c in combined_df.columns]
+        new_order += [c for c in combined_df.columns if c not in new_order]
+        
+        combined_df[new_order].to_csv(db_file, index=False)
+        st.sidebar.success(f"Added {len(final_new_df)} fully processed climate records!")
+        time.sleep(1.5)
+        st.rerun()
 
 
 # ==========================================
@@ -156,8 +163,8 @@ with st.sidebar:
         if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
             with st.spinner("Querying GBIF..."):
                 spp_encoded = urllib.parse.quote(gbif_spp)
-                # Over-fetch massive pool (limit * 5) to allow mathematical thinning down to requested limit
-                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit={g_limit * 5}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
+                fetch_limit = min(g_limit * 5, 300) # Cap safety to avoid hitting API hard limits
+                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit={fetch_limit}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
                 
                 raw_records = []
                 try:
@@ -196,7 +203,8 @@ with st.sidebar:
         if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
             with st.spinner(f"Downloading observations..."):
                 spp_encoded = urllib.parse.quote(inat_spp)
-                url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page={i_limit * 5}&quality_grade=research"
+                fetch_limit = min(i_limit * 5, 200) # Cap safety
+                url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page={fetch_limit}&quality_grade=research"
                 
                 raw_records = []
                 try:
