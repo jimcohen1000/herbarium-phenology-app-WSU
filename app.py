@@ -59,7 +59,7 @@ c1, c2 = st.columns([1, 2.2])
 # Column 1: Data Collection
 with c1:
     st.subheader("Data Collection")
-    tab1, tab2 = st.tabs(["🌿 Herbarium", "🦋 iNaturalist"])
+    tab1, tab2, tab3 = st.tabs(["🌿 Manual", "🦋 iNaturalist", "🏛️ Digital Herbaria"])
     
     # --- TAB 1: MANUAL HERBARIUM ENTRY ---
     with tab1:
@@ -89,7 +89,7 @@ with c1:
                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                 
                 row = {
-                    "Data_Source": "Herbarium",
+                    "Data_Source": "Manual Entry",
                     "Collector": collector, "Col_Number": col_num, "Barcode": barcode,
                     "Species": spp, "DOY": int(date_val.strftime("%j")), "Year": date_val.year,
                     "Flowering": flow, "Fruiting": fruit, "Vegetative": veg,
@@ -106,8 +106,7 @@ with c1:
                     
                 df_combined = pd.concat([df_existing, pd.DataFrame([row])], ignore_index=True)
                 save_with_ordered_columns(df_combined, db_file)
-                
-                st.success("Herbarium Entry saved!")
+                st.success("Entry saved!")
                 st.rerun()
 
     # --- TAB 2: INATURALIST BATCH IMPORT ---
@@ -115,7 +114,6 @@ with c1:
         with st.form("inat_import_form"):
             inat_spp = st.text_input("Target Species", "Anemone patens")
             
-            st.write("**Date Range (Ensures ClimateNA compatibility):**")
             col_d1, col_d2 = st.columns(2)
             with col_d1: d1 = st.date_input("Start Date", value=date(2000, 1, 1))
             with col_d2: d2 = st.date_input("End Date", value=date(2022, 12, 31))
@@ -123,13 +121,13 @@ with c1:
             inat_limit = st.slider("Records to Fetch", 5, 50, 25, step=5)
             st.info("Pulls Location -> Calculates Elevation -> Fetches ClimateNA models.")
             
-            inat_submitted = st.form_submit_button("📥 FETCH & PROCESS DATA", type="primary", use_container_width=True)
+            inat_submitted = st.form_submit_button("📥 FETCH iNATURALIST", type="primary", use_container_width=True)
             
         if inat_submitted:
             records = []
             url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&per_page={inat_limit}&d1={d1}&d2={d2}"
             
-            st.write(f"Contacting iNaturalist for {inat_limit} records between {d1.year} and {d2.year}...")
+            st.write(f"Contacting iNaturalist for {inat_limit} records...")
             res = requests.get(url, timeout=15)
             
             if res.status_code == 200:
@@ -141,10 +139,8 @@ with c1:
                     for i, obs in enumerate(data):
                         if obs.get('location') and obs.get('observed_on'):
                             lat_str, lon_str = obs['location'].split(',')
-                            date_str = obs['observed_on']
-                            
                             try:
-                                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                                dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
                                 lat, lon = float(lat_str), float(lon_str)
                                 
                                 status_text.text(f"Processing {i+1}/{len(data)}: Finding elevation...")
@@ -157,6 +153,97 @@ with c1:
                                     "Year": dt.year, "DOY": dt.timetuple().tm_yday,
                                     "Flowering": False, "Fruiting": False, "Vegetative": False,
                                     "URL": obs.get('uri', "")
+                                }
+                                
+                                if el is not None:
+                                    status_text.text(f"Processing {i+1}/{len(data)}: Pulling climate models...")
+                                    year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
+                                    norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                                    for k, v in year_data.items(): row[f"Y_{k}"] = v
+                                    for k, v in norm_data.items(): row[f"N_{k}"] = v
+                                
+                                records.append(row)
+                            except Exception:
+                                pass
+                        progress_bar.progress((i + 1) / len(data))
+                    
+                    status_text.text("Finished processing!")
+                    if records:
+                        try:
+                            df_existing = pd.read_csv(db_file)
+                        except Exception:
+                            df_existing = pd.DataFrame(columns=base_headers)
+                        df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
+                        save_with_ordered_columns(df_combined, db_file)
+                        st.success(f"Added {len(records)} iNaturalist records!")
+                        time.sleep(1)
+                        st.rerun()
+                else:
+                    st.warning("No records found.")
+            else:
+                st.error("Failed to connect to iNaturalist.")
+
+    # --- TAB 3: DIGITAL HERBARIA (GBIF) BATCH IMPORT ---
+    with tab3:
+        with st.form("gbif_import_form"):
+            st.markdown("Query global databases (including **CCH2**, **Intermountain Biota**, and **PNW Herbaria**) via GBIF.")
+            gbif_spp = st.text_input("Target Species", "Anemone patens", key="g_spp")
+            
+            col_g1, col_g2 = st.columns(2)
+            with col_g1: g_d1 = st.date_input("Start Date", value=date(1950, 1, 1), key="g_d1")
+            with col_g2: g_d2 = st.date_input("End Date", value=date(2022, 12, 31), key="g_d2")
+            
+            gbif_limit = st.slider("Records to Fetch", 5, 50, 25, step=5, key="g_lim")
+            st.info("Pulls Collector, Barcode & Image URL -> Validates Elevation -> Fetches ClimateNA.")
+            
+            gbif_submitted = st.form_submit_button("📥 FETCH HERBARIA DATA", type="primary", use_container_width=True)
+            
+        if gbif_submitted:
+            records = []
+            date_range = f"{g_d1.strftime('%Y-%m-%d')},{g_d2.strftime('%Y-%m-%d')}"
+            
+            # API query demands: Correct Species, Has Coordinates, Is an Image, Is a Physical Specimen
+            url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&eventDate={date_range}&limit={gbif_limit}"
+            
+            st.write(f"Contacting GBIF network for {gbif_limit} records...")
+            res = requests.get(url, timeout=15)
+            
+            if res.status_code == 200:
+                data = res.json().get('results', [])
+                if data:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for i, obs in enumerate(data):
+                        y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
+                        lat, lon = obs.get('decimalLatitude'), obs.get('decimalLongitude')
+                        
+                        # Only proceed if we have complete dates and coordinates
+                        if y and m and d and lat and lon:
+                            try:
+                                dt = datetime(int(y), int(m), int(d))
+                                
+                                # Use elevation from herbarium if available, otherwise fetch Open-Meteo
+                                el = obs.get('elevation')
+                                if pd.isna(el) or el is None:
+                                    status_text.text(f"Processing {i+1}/{len(data)}: Finding elevation...")
+                                    el = get_elevation(lat, lon)
+                                
+                                # Determine URL (Prefer the institution's page, otherwise the direct image link)
+                                rec_url = obs.get('references', '')
+                                if not rec_url and obs.get('media'):
+                                    rec_url = obs.get('media')[0].get('identifier', '')
+                                    
+                                row = {
+                                    "Data_Source": "Digitized Herbarium",
+                                    "Collector": obs.get('recordedBy', ''),
+                                    "Col_Number": obs.get('recordNumber', ''),
+                                    "Barcode": obs.get('catalogNumber', ''),
+                                    "Species": obs.get('species', gbif_spp),
+                                    "Latitude": float(lat), "Longitude": float(lon), "Elevation": el,
+                                    "Year": dt.year, "DOY": dt.timetuple().tm_yday,
+                                    "Flowering": False, "Fruiting": False, "Vegetative": False,
+                                    "URL": rec_url
                                 }
                                 
                                 if el is not None:
@@ -182,18 +269,17 @@ with c1:
                             
                         df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
                         save_with_ordered_columns(df_combined, db_file)
-                        st.success(f"Successfully added {len(records)} iNaturalist records!")
+                        st.success(f"Successfully added {len(records)} digital herbarium records!")
+                        time.sleep(1.5)
                         st.rerun()
                 else:
-                    st.warning("No records found for that species.")
+                    st.warning("No digital herbarium records found with images & coordinates for those dates.")
             else:
-                st.error("Failed to connect to iNaturalist.")
+                st.error("Failed to connect to the global database.")
 
 # Column 2: Graphing & Database
 with c2:
     st.subheader("📊 Analysis Dashboard")
-    
-    # Safely load the CSV. If it's corrupted or truly empty, load headers only.
     try:
         df = pd.read_csv(db_file)
     except Exception:
@@ -203,7 +289,6 @@ with c2:
         if col not in df.columns:
             df[col] = None
             
-    # SAFETY CHECK: Always force phenology to boolean for the filters and table
     if not df.empty:
         for col in ["Flowering", "Fruiting", "Vegetative"]:
             df[col] = df[col].fillna(False).astype(bool)
@@ -211,7 +296,6 @@ with c2:
     # --- GRAPH SECTION ---
     if not df.empty and len(df) > 0:
         plot_vars = ["Year", "Latitude", "Longitude", "Elevation"] + [c for c in df.columns if c.startswith('Y_') or c.startswith('N_')]
-        
         if len(plot_vars) > 0:
             g1, g2 = st.columns(2)
             with g1: x_var = st.selectbox("Select X-Axis Variable:", plot_vars)
@@ -219,14 +303,12 @@ with c2:
                 species_list = df["Species"].dropna().unique()
                 selected_spp = st.multiselect("Filter Species:", species_list, default=species_list)
             
-            # --- NEW PHENOLOGY FILTERS ---
             st.write("**Require Phenology Traits:**")
             p1, p2, p3 = st.columns(3)
             with p1: req_flow = st.checkbox("Flowering Only")
             with p2: req_fruit = st.checkbox("Fruiting Only")
             with p3: req_veg = st.checkbox("Vegetative Only")
 
-            # Apply filters
             plot_df = df[df["Species"].isin(selected_spp)].copy()
             if req_flow: plot_df = plot_df[plot_df["Flowering"] == True]
             if req_fruit: plot_df = plot_df[plot_df["Fruiting"] == True]
@@ -236,11 +318,10 @@ with c2:
                 plot_df[x_var] = pd.to_numeric(plot_df[x_var], errors='coerce')
                 plot_df = plot_df.dropna(subset=[x_var, "DOY"])
                 if not plot_df.empty:
-                    # --- UPDATED PLOTLY GRAPH ---
                     fig = px.scatter(
                         plot_df, x=x_var, y="DOY", 
-                        color="Species",           # 👈 Species are now colors
-                        symbol="Data_Source",      # 👈 Data Source is now shapes
+                        color="Species", 
+                        symbol="Data_Source", 
                         hover_data=["Year", "URL"] if "URL" in plot_df.columns else ["Year"],
                         trendline="ols", 
                         title=f"Phenology (DOY) vs {x_var}"
@@ -255,16 +336,12 @@ with c2:
     
     # --- TABLE SECTION ---
     st.subheader("📋 Formatted Database Ledger")
-    st.info("💡 You can edit Species names, check off Phenology, or select and delete rows directly in this table! Click 'Save Ledger Edits' below to write changes to the CSV.")
-    
     if not df.empty:
         df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
             
     edited_df = st.data_editor(
         df, 
-        use_container_width=True, 
-        hide_index=True,
-        num_rows="dynamic", 
+        use_container_width=True, hide_index=True, num_rows="dynamic", 
         column_config={
             "Year": st.column_config.NumberColumn("Year", format="%d"),
             "DOY": st.column_config.NumberColumn("DOY"),
@@ -281,7 +358,6 @@ with c2:
     )
     
     col_save, col_dl, _ = st.columns([1, 1, 2])
-    
     with col_save:
         if st.button("💾 Save Ledger Edits", type="primary", use_container_width=True):
             save_with_ordered_columns(edited_df, db_file)
@@ -289,25 +365,16 @@ with c2:
             st.rerun()
 
     with col_dl:
-        st.download_button(
-            "📥 Download Full CSV", 
-            data=df.to_csv(index=False), 
-            file_name="full_data.csv", 
-            use_container_width=True
-        )
+        st.download_button("📥 Download Full CSV", data=df.to_csv(index=False), file_name="full_data.csv", use_container_width=True)
         
     with st.expander("⚠️ Danger Zone"):
         st.write("Wiping the database will clear your current view, but a timestamped backup will automatically be saved in your folder first.")
-        
         if st.button("Wipe Entire Database", type="secondary"):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_file = f"herbarium_backup_{timestamp}.csv"
-            
             if os.path.exists(db_file):
                 pd.read_csv(db_file).to_csv(backup_file, index=False)
-            
             pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
-            
-            st.success(f"Database wiped! Your previous data was safely backed up to: {backup_file}")
-            time.sleep(3) 
+            st.success(f"Database wiped! Backed up to: {backup_file}")
+            time.sleep(2) 
             st.rerun()
