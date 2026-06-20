@@ -388,7 +388,7 @@ with c2:
 
     edited_df = st.data_editor(
         df, 
-    dynamic_key = f"herbarium_ledger_{len(df.columns)}"
+    dynamic_key = f"herbarium_ledger_{len(df.columns)}",
         use_container_width=True, hide_index=True, num_rows="dynamic", 
         column_config={
             "Year": st.column_config.NumberColumn("Year", format="%d"),
