@@ -433,7 +433,7 @@ with c2:
         }
     )
     
-    col_save, col_dl, _ = st.columns([1, 1, 2])
+    col_save, col_dl_clean, col_dl_full = st.columns([1, 1.2, 1.2])
     
     with col_save:
         if st.button("💾 Save Ledger Edits", type="primary", width="stretch"):
@@ -442,16 +442,48 @@ with c2:
             time.sleep(1)
             st.rerun()
 
-    with col_dl:
-        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dynamic_filename = f"herbarium_export_{current_time}.csv"
-        
+    # Generate a unique timestamp for filenames
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    with col_dl_clean:
+        # Prepare a clean spreadsheet containing only the main visible tracking columns
+        if os.path.exists(db_file):
+            try:
+                clean_df = pd.read_csv(db_file)
+                main_cols = ["Data_Source", "Collector", "Col_Number", "Barcode", "Species", 
+                             "DOY", "Year", "Flowering", "Fruiting", "Vegetative", 
+                             "Latitude", "Longitude", "Elevation", "URL"]
+                existing_main_cols = [c for c in main_cols if c in clean_df.columns]
+                clean_csv = clean_df[existing_main_cols].to_csv(index=False).encode('utf-8')
+            except Exception:
+                clean_csv = b""
+        else:
+            clean_csv = b""
+
         st.download_button(
-            label="📥 Download Full CSV", 
-            data=edited_df.to_csv(index=False).encode('utf-8'), 
-            file_name=dynamic_filename, 
+            label="📥 Download Clean Ledger", 
+            data=clean_csv, 
+            file_name=f"herbarium_clean_{current_time}.csv", 
             mime="text/csv",
-            width="stretch"
+            width="stretch",
+            help="Downloads a lightweight sheet containing only the main columns visible in your ledger."
+        )
+
+    with col_dl_full:
+        # Read the raw full file directly from the disk to bypass Streamlit render lag
+        if os.path.exists(db_file):
+            with open(db_file, "rb") as f:
+                full_csv_bytes = f.read()
+        else:
+            full_csv_bytes = b""
+            
+        st.download_button(
+            label="📦 Download Full CSV (with Climate)", 
+            data=full_csv_bytes, 
+            file_name=f"herbarium_full_{current_time}.csv", 
+            mime="text/csv",
+            width="stretch",
+            help="Downloads the complete database including all 500+ climate environment columns."
         )
         
     with st.expander("⚠️ Danger Zone"):
