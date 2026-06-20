@@ -146,7 +146,8 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 row_dict['Elevation'] = el
             
             if year is not None:
-                climate_year = min(year, 2022) 
+                # Capped to 2021 due to lag in ClimateNA API historical year availability
+                climate_year = min(year, 2021) 
                 status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                 
                 year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
@@ -166,7 +167,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                         ty, tm = calc_prior_3_months(year, doy)
                         if ty and tm:
                             prev_year_data = {}
-                            ty_capped = [min(y, 2022) for y in ty]
+                            ty_capped = [min(y, 2021) for y in ty]
                             
                             if min(ty_capped) < climate_year: 
                                 prev_year_data = get_climate_data(lat, lon, el, f"Year_{min(ty_capped)}")
@@ -280,10 +281,17 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                             m, d = obs.get('month'), obs.get('day')
                             doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday if y and m and d else pd.NA
                             raw_records.append({
-                                "Data_Source": "GBIF Herbarium", "Collector": obs.get('recordedBy', ''),
-                                "Species": obs.get('species', gbif_spp), "Year": safe_int(y) if y else pd.NA,
-                                "DOY": doy, "Latitude": obs.get('decimalLatitude'), "Longitude": obs.get('decimalLongitude'), 
-                                "Elevation": obs.get('elevation', pd.NA), "URL": rec_url, 
+                                "Data_Source": "GBIF Herbarium", 
+                                "Collector": obs.get('recordedBy', ''),
+                                "Col_Number": obs.get('recordNumber', ''),
+                                "Barcode": obs.get('catalogNumber', '') or obs.get('occurrenceID', ''),
+                                "Species": obs.get('species', gbif_spp), 
+                                "Year": safe_int(y) if y else pd.NA,
+                                "DOY": doy, 
+                                "Latitude": obs.get('decimalLatitude'), 
+                                "Longitude": obs.get('decimalLongitude'), 
+                                "Elevation": obs.get('elevation', pd.NA), 
+                                "URL": rec_url, 
                                 "Flowering": False, "Fruiting": False, "Vegetative": False
                             })
                         end_of_records = data.get('endOfRecords', True)
@@ -313,7 +321,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
-            raw_records, page = [], 1
+            raw_records, page = 1, 1
             while len(raw_records) < 3000 and page <= 15:
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
@@ -342,9 +350,14 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                 except: obs_year, obs_doy = pd.NA, pd.NA
                                     
                                 raw_records.append({
-                                    "Data_Source": "iNaturalist", "Collector": obs.get('user', {}).get('login', ''),
-                                    "Species": obs.get('taxon', {}).get('name', inat_spp), "Year": obs_year, "DOY": obs_doy,
-                                    "Latitude": lat_flt, "Longitude": lon_flt, "Elevation": fetched_elev, "URL": rec_url, 
+                                    "Data_Source": "iNaturalist", 
+                                    "Collector": obs.get('user', {}).get('login', ''),
+                                    "Col_Number": pd.NA,
+                                    "Barcode": obs.get('id', ''),
+                                    "Species": obs.get('taxon', {}).get('name', inat_spp), 
+                                    "Year": obs_year, "DOY": obs_doy,
+                                    "Latitude": lat_flt, "Longitude": lon_flt, 
+                                    "Elevation": fetched_elev, "URL": rec_url, 
                                     "Flowering": False, "Fruiting": False, "Vegetative": False
                                 })
                         if len(results) < 200: break 
@@ -490,14 +503,17 @@ with tab4:
         target_idx = st.selectbox("Select Record:", unscored.index, format_func=lambda x: f"Index {x}: {df.loc[x, 'Species']} ({df.loc[x, 'Data_Source']}) - Year {df.loc[x, 'Year']}")
         
         row = df.loc[target_idx]
-        st.markdown(f"### [🔗 Click Here to View Original Specimen Image/Page]({row['URL']})")
+        
+        # Swapped Markdown for a native Streamlit link button to ensure it routes properly
+        st.link_button("🔗 Click Here to View Original Specimen Image/Page", row['URL'], type="primary", use_container_width=True)
+        st.write("---")
         
         c_s1, c_s2, c_s3 = st.columns(3)
         with c_s1: f1 = st.checkbox("🌸 Flowering", value=bool(row['Flowering']), key=f"f1_{target_idx}")
         with c_s2: f2 = st.checkbox("🍒 Fruiting", value=bool(row['Fruiting']), key=f"f2_{target_idx}")
         with c_s3: f3 = st.checkbox("🍃 Vegetative (Leaves)", value=bool(row['Vegetative']), key=f"f3_{target_idx}")
         
-        if st.button("💾 Save Phenology & Load Next", type="primary"):
+        if st.button("💾 Save Phenology & Load Next", type="secondary"):
             df.at[target_idx, 'Flowering'] = f1
             df.at[target_idx, 'Fruiting'] = f2
             df.at[target_idx, 'Vegetative'] = f3
