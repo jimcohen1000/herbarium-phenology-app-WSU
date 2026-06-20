@@ -306,8 +306,11 @@ else:
     # Dynamically grab all numeric columns for the dropdowns
     numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
     
-    if len(numeric_cols) < 2:
-        st.warning("Not enough numeric data to plot. Add more records to generate graphs.")
+    # Drop rows that have NaNs in the selected plotting columns to avoid trendline errors
+    plot_df = plot_df.dropna(subset=numeric_cols)
+    
+    if len(numeric_cols) < 2 or len(plot_df) < 2:
+        st.warning("Not enough valid numeric data to plot. Add more records to generate graphs.")
     else:
         st.markdown("Use the dropdowns below to explore relationships between any two variables in your dataset.")
         
@@ -322,7 +325,7 @@ else:
         with sel_col2:
             selected_y = st.selectbox("Select Y-Axis:", options=numeric_cols, index=default_y_ix)
             
-        # Generate the dynamic scatter plot
+        # Generate the dynamic scatter plot with a global trendline
         fig_explorer = px.scatter(
             plot_df, 
             x=selected_x, 
@@ -331,8 +334,35 @@ else:
             hover_data=['Collector', 'Year', 'DOY'] if all(c in plot_df.columns for c in ['Collector', 'Year', 'DOY']) else None,
             labels={selected_x: selected_x, selected_y: selected_y},
             template="streamlit",
-            title=f"{selected_y} vs. {selected_x}"
+            title=f"{selected_y} vs. {selected_x}",
+            trendline="ols",
+            trendline_scope="overall" # Calculates one trendline for all data instead of per-species
         )
+        
+        # Extract the equation and R-squared value to place on the chart
+        try:
+            results = px.get_trendline_results(fig_explorer)
+            if not results.empty:
+                model = results.iloc[0]["px_fit_results"]
+                slope = model.params.iloc[1]
+                intercept = model.params.iloc[0]
+                r2 = model.rsquared
+                
+                # Format the intercept sign nicely
+                sign = "+" if intercept >= 0 else "-"
+                eq_text = f"<b>y = {slope:.3f}x {sign} {abs(intercept):.3f}</b><br>R² = {r2:.3f}"
+                
+                # Add a text box to the top left of the graph
+                fig_explorer.add_annotation(
+                    x=0.02, y=0.98, xref="paper", yref="paper",
+                    text=eq_text, showarrow=False,
+                    bgcolor="rgba(255, 255, 255, 0.8)",
+                    bordercolor="gray", borderwidth=1,
+                    xanchor="left", yanchor="top"
+                )
+        except Exception as e:
+            # Silently pass if statsmodels is missing or data is perfectly vertical/horizontal
+            pass 
         
         # Make the chart look clean and utilize the page width
         fig_explorer.update_layout(margin=dict(l=20, r=20, t=40, b=20))
