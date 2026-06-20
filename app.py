@@ -443,7 +443,7 @@ with c2:
     with col_dl:
         st.download_button(
             label="📥 Download Full CSV", 
-            data=df.to_csv(index=False).encode('utf-8'), 
+            data=edited_df.to_csv(index=False).encode('utf-8'), # <--- Looking at your live ledger
             file_name="herbarium_full_data.csv", 
             mime="text/csv",
             width="stretch"
