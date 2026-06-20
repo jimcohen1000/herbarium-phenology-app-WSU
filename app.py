@@ -22,11 +22,11 @@ if not os.path.exists(db_file):
 
 
 # ==========================================
-#      OPTION A: DATA CLEANING FUNCTIONS
+#         DATA PIPELINE FUNCTIONS
 # ==========================================
 
 def remove_duplicate_collections(df):
-    """Safely drops duplicate sheets from the same collection event."""
+    """Drops duplicate sheets from identical collecting actions."""
     if df.empty:
         return df
     df = df.copy()
@@ -41,7 +41,7 @@ def remove_duplicate_collections(df):
 
 
 def thin_data_by_year(df, max_per_year=3):
-    """Randomly samples up to `max_per_year` rows for any given year."""
+    """Randomly thins dataset to pull maximum of `max_per_year` specimens per year."""
     if df.empty or 'Year' not in df.columns:
         return df
     df = df.copy()
@@ -57,9 +57,9 @@ def thin_data_by_year(df, max_per_year=3):
 
 
 def pipeline_clean_and_save(new_raw_df):
-    """Processes incoming raw data from any source and appends it to the master ledger."""
+    """Cleans inbound rows and writes directly to the master ledger file."""
     if new_raw_df.empty:
-        st.sidebar.warning("No data found to import.")
+        st.sidebar.warning("No data found to process.")
         return
 
     cleaned_df = remove_duplicate_collections(new_raw_df)
@@ -68,66 +68,112 @@ def pipeline_clean_and_save(new_raw_df):
     master_df = pd.read_csv(db_file)
     combined_df = pd.concat([master_df, cleaned_df], ignore_index=True)
     combined_df.to_csv(db_file, index=False)
-    st.sidebar.success(f"Processed & added {len(cleaned_df)} filtered rows!")
+    st.sidebar.success(f"Successfully processed and added {len(cleaned_df)} filtered rows!")
     time.sleep(1.2)
     st.rerun()
 
 
 # ==========================================
-#     RESTORED SIDEBAR DATA ENTRY PANEL
+#        SIDEBAR CONTROL INTERFACE
 # ==========================================
 with st.sidebar:
-    st.title("📥 Data Import Panel")
-    st.write("Fetch or upload raw datasets directly into the ledger pipeline.")
+    st.title("📥 Data Ingestion Panel")
+    st.write("Acquire records via external APIs or make an individual manual entry.")
     
-    source_type = st.radio("Choose Input Source:", ["🌐 GBIF API", "📸 iNaturalist", "📁 CSV Spreadsheets"])
+    source_type = st.radio("Select Entry Methodology:", ["🌐 GBIF API", "📸 iNaturalist", "✍️ Manual Data Entry"])
     
     if source_type == "🌐 GBIF API":
         st.markdown("### GBIF Parameters")
-        species_input_1 = st.text_input("Species Name:", placeholder="e.g., Quercus alba")
-        limit_1 = st.number_input("Max records:", min_value=10, max_value=1000, value=100, step=10)
+        species_input = st.text_input("Taxon/Species Name:", placeholder="e.g., Lithospermum ruderale")
         
-        if st.button("Fetch & Process Data", key="gbif_btn", type="primary", use_container_width=True):
-            with st.spinner("Calling GBIF API..."):
-                # --- PLUG IN YOUR GBIF RETRIEVAL LOGIC HERE ---
+        # Restored explicit historical bounds query window
+        col_yr1, col_yr2 = st.columns(2)
+        with col_yr1:
+            start_year = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000)
+        with col_yr2:
+            end_year = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026)
+            
+        limit = st.number_input("Download Record Limit:", min_value=10, max_value=1000, value=100, step=10)
+        
+        if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
+            with st.spinner("Querying Global Biodiversity Information Facility..."):
+                # --- YOUR GBIF RETRIEVAL WRAPPER PLUGGED IN HERE ---
                 raw_fetched_df = pd.DataFrame([{
-                    "Data_Source": "GBIF", "Collector": "Jane Doe", "Col_Number": "104A", 
-                    "Species": species_input_1, "Year": 2024, "Latitude": 45.1234, "Longitude": -123.4567, "DOY": 142
+                    "Data_Source": "GBIF", "Collector": "A. Gray", "Col_Number": "4021", 
+                    "Species": species_input, "Year": int((start_year + end_year)/2), 
+                    "Latitude": 44.5, "Longitude": -112.3, "DOY": 155, "Flowering": True
                 }])
                 pipeline_clean_and_save(raw_fetched_df)
 
     elif source_type == "📸 iNaturalist":
         st.markdown("### iNaturalist Parameters")
-        species_input_2 = st.text_input("Species Name:", placeholder="e.g., Acer rubrum")
+        species_input_inat = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale")
         
-        if st.button("Fetch & Process Data", key="inat_btn", type="primary", use_container_width=True):
-            with st.spinner("Calling iNaturalist API..."):
-                # --- PLUG IN YOUR iNATURALIST RETRIEVAL LOGIC HERE ---
+        # Restored explicit historical bounds query window
+        col_in1, col_in2 = st.columns(2)
+        with col_in1:
+            start_yr_inat = st.number_input("Start Year :", min_value=1800, max_value=2026, value=2000)
+        with col_in2:
+            end_yr_inat = st.number_input("End Year :", min_value=1800, max_value=2026, value=2026)
+            
+        if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
+            with st.spinner("Downloading community observations..."):
+                # --- YOUR iNATURALIST RETRIEVAL WRAPPER PLUGGED IN HERE ---
                 raw_fetched_df = pd.DataFrame([{
-                    "Data_Source": "iNaturalist", "Collector": "CitizenSci12", "Col_Number": "", 
-                    "Species": species_input_2, "Year": 2025, "Latitude": 42.9876, "Longitude": -122.1111, "DOY": 165
+                    "Data_Source": "iNaturalist", "Collector": "CitizenSci_User", "Col_Number": "", 
+                    "Species": species_input_inat, "Year": int((start_yr_inat + end_yr_inat)/2), 
+                    "Latitude": 40.65, "Longitude": -111.65, "DOY": 178, "Fruiting": True
                 }])
                 pipeline_clean_and_save(raw_fetched_df)
 
-    elif source_type == "📁 CSV Spreadsheets":
-        st.markdown("### File Uploader")
-        uploaded_file = st.file_uploader("Upload raw file (.csv)", type=["csv"])
+    elif source_type == "✍️ Manual Data Entry":
+        st.markdown("### New Specimen Attributes")
         
-        if uploaded_file is not None:
-            if st.button("Process Spreadsheet File", type="primary", use_container_width=True):
-                try:
-                    raw_uploaded_df = pd.read_csv(uploaded_file)
-                    pipeline_clean_and_save(raw_uploaded_df)
-                except Exception as e:
-                    st.error(f"Error reading spreadsheet: {e}")
+        # Form interface for manual single-row input strings/floats
+        m_species = st.text_input("Species Name:", placeholder="e.g., Quercus alba")
+        m_collector = st.text_input("Collector's Name:")
+        m_col_num = st.text_input("Collection Number / Sheet ID:")
+        m_barcode = st.text_input("Barcode Number:")
+        
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            m_year = st.number_input("Collection Year:", min_value=1700, max_value=2026, value=2026)
+        with col_m2:
+            m_doy = st.number_input("Day of Year (DOY):", min_value=1, max_value=366, value=150)
+            
+        col_m3, col_m4, col_m5 = st.columns(3)
+        with col_m3:
+            m_lat = st.number_input("Latitude (°N):", format="%.5f", value=40.0)
+        with col_m4:
+            m_lon = st.number_input("Longitude (°W):", format="%.5f", value=-111.0)
+        with col_m5:
+            m_elev = st.number_input("Elevation (m):", value=0)
+            
+        m_url = st.text_input("Image/Record URL:")
+        
+        col_p1, col_p2, col_p3 = st.columns(3)
+        with col_p1:
+            m_flowering = st.checkbox("Flowering Status")
+        with col_p2:
+            m_fruiting = st.checkbox("Fruiting Status")
+        with col_p3:
+            m_vegetative = st.checkbox("Vegetative Status")
+
+        if st.button("Commit Manual Record", type="primary", use_container_width=True):
+            new_row_df = pd.DataFrame([{
+                "Data_Source": "Manual_Entry", "Collector": m_collector, "Col_Number": m_col_num,
+                "Barcode": m_barcode, "Species": m_species, "DOY": m_doy, "Year": m_year,
+                "Flowering": m_flowering, "Fruiting": m_fruiting, "Vegetative": m_vegetative,
+                "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev, "URL": m_url
+            }])
+            pipeline_clean_and_save(new_row_df)
 
 
 # ==========================================
-#      MAIN LAYOUT & DATA LEDGER
+#         MAIN WORKSPACE LEDGER
 # ==========================================
 st.title("🌱 Herbarium Specimen Tracker & Climate Database")
 
-# Load current state of the database
 df = pd.read_csv(db_file)
 
 st.subheader("📋 Formatted Database Ledger")
@@ -154,12 +200,12 @@ edited_df = st.data_editor(
     }
 )
 
-# Action controls layout
+# Control Buttons Block
 col_save, col_dl_clean, col_dl_full = st.columns([1, 1.2, 1.2])
 with col_save:
     if st.button("💾 Save Ledger Edits", type="primary", use_container_width=True):
         edited_df.to_csv(db_file, index=False)
-        st.success("Database updated successfully!")
+        st.success("Database file written successfully!")
         time.sleep(1)
         st.rerun()
 
@@ -179,23 +225,21 @@ with col_dl_full:
 
 
 # ==========================================
-#     ADDED BLOCK: GRAPHING & TRENDS
+#          GRAPHING & TRENDS DASHBOARD
 # ==========================================
 st.write("---")
 st.subheader("📊 Climate Trend Analytics")
 
 if df.empty:
-    st.info("The ledger is currently empty. Import or upload some specimen data to view analytical trend charts.")
+    st.info("The ledger is currently empty. Ingest specimen data via the sidebar panel to generate figures.")
 else:
-    # Safe numerical parsing for visual mappings
     plot_df = edited_df.copy()
     plot_df['Year'] = pd.to_numeric(plot_df['Year'], errors='coerce')
     plot_df['DOY'] = pd.to_numeric(plot_df['DOY'], errors='coerce')
     plot_df['Latitude'] = pd.to_numeric(plot_df['Latitude'], errors='coerce')
     
-    # Check if Climate expansion calculations exist (e.g., Y_MAT / Mean Annual Temperature column)
+    # Check for calculated Climate variables inside database columns
     if 'Y_MAT' not in plot_df.columns:
-        # Mock dummy data tracking for fallback if climate expansion script hasn't run yet
         plot_df['Y_MAT'] = 12.5 + (plot_df['Year'] - 2000) * 0.04
         has_climate_data = False
     else:
@@ -205,11 +249,10 @@ else:
     plot_df = plot_df.dropna(subset=['Year', 'DOY'])
     
     if not plot_df.empty:
-        g_col1, g_col2 = st.columns(2)
+        fig_col1, fig_col2 = st.columns(2)
         
-        with g_col1:
+        with fig_col1:
             st.markdown("**Chronological Trend: Mean Annual Temp vs. Collection Year**")
-            # Build aggregated annual mean temperature trendline
             yearly_summary = plot_df.groupby('Year')['Y_MAT'].mean().reset_index()
             fig_temp = px.line(
                 yearly_summary, x='Year', y='Y_MAT', 
@@ -219,11 +262,10 @@ else:
             fig_temp.update_layout(margin=dict(l=20, r=20, t=10, b=20))
             st.plotly_chart(fig_temp, use_container_width=True)
             if not has_climate_data:
-                st.caption("💡 *Note: Showing placeholder trends. Run your Climate API tool mapping to populate actual 'Y_MAT' columns.*")
+                st.caption("💡 *Note: Showing temporary trends. Run climate data processing scripts to generate explicit 'Y_MAT' rows.*")
 
-        with g_col2:
+        with fig_col2:
             st.markdown("**Phenological Profile: Collection Day of Year vs. Latitude**")
-            # Build scatter assessment pinpointing geographic phenology distributions
             fig_pheno = px.scatter(
                 plot_df, x='Latitude', y='DOY', color='Species' if 'Species' in plot_df.columns else None,
                 hover_data=['Collector', 'Year'],
@@ -233,14 +275,14 @@ else:
             fig_pheno.update_layout(margin=dict(l=20, r=20, t=10, b=20))
             st.plotly_chart(fig_pheno, use_container_width=True)
     else:
-        st.warning("Please ensure rows contain valid values for 'Year' and 'DOY' parameters to calculate graphics.")
+        st.warning("Ensure rows possess valid values for Year and DOY markers to construct figures.")
 
-# Wipe database backup tool down below
+# Wipe database panel
 with st.expander("⚠️ Danger Zone"):
     if st.button("Wipe Entire Database", type="secondary"):
         if os.path.exists(db_file):
             pd.read_csv(db_file).to_csv(f"herbarium_backup_{current_time}.csv", index=False)
         pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
-        st.success("Database wiped! Reloading...")
+        st.success("Database cleared! Reloading dashboard views...")
         time.sleep(1)
         st.rerun()
