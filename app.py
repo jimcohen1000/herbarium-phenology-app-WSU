@@ -7,7 +7,6 @@ import urllib.parse
 import time
 import os
 import numpy as np
-import streamlit.components.v1 as components
 
 # ==========================================
 #          APP SETUP & CONFIG
@@ -86,6 +85,14 @@ def get_climate_data(lat, lon, el, prd):
     except: return {}
     return {}
 
+def get_climate_val(data_dict, prefix, m_str):
+    target = f"{prefix}{m_str}".lower()
+    for k, v in data_dict.items():
+        if k.lower() == target:
+            try: return float(v)
+            except: return None
+    return None
+
 def save_with_ordered_columns(df_to_save, filepath):
     new_order = [c for c in base_headers if c in df_to_save.columns]
     new_order += [c for c in df_to_save.columns if c not in new_order]
@@ -141,9 +148,13 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if year is not None:
                 climate_year = min(year, 2022) 
                 status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
+                
                 year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
                 if not year_data: year_data = get_climate_data(lat, lon, el, str(climate_year))
+                
                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                if not norm_data: norm_data = get_climate_data(lat, lon, el, "1961-1990")
+                if not norm_data: norm_data = get_climate_data(lat, lon, el, "1961_1990")
                 
                 if year_data and norm_data:
                     for k, v in year_data.items(): 
@@ -155,17 +166,22 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                         ty, tm = calc_prior_3_months(year, doy)
                         if ty and tm:
                             prev_year_data = {}
-                            if min(ty) < year: prev_year_data = get_climate_data(lat, lon, el, f"Year_{min(ty)}")
+                            ty_capped = [min(y, 2022) for y in ty]
+                            
+                            if min(ty_capped) < climate_year: 
+                                prev_year_data = get_climate_data(lat, lon, el, f"Year_{min(ty_capped)}")
+                                if not prev_year_data: prev_year_data = get_climate_data(lat, lon, el, str(min(ty_capped)))
                             
                             y_vals, n_vals = [], []
-                            for y_t, m_t in zip(ty, tm):
+                            for y_t_cap, m_t in zip(ty_capped, tm):
                                 m_str = f"{m_t:02d}"
-                                n_val = norm_data.get(f"Tave{m_str}")
-                                if n_val is not None: n_vals.append(float(n_val))
                                 
-                                target_data = year_data if y_t == year else prev_year_data
-                                y_val = target_data.get(f"Tave{m_str}")
-                                if y_val is not None: y_vals.append(float(y_val))
+                                n_val = get_climate_val(norm_data, "tave", m_str)
+                                if n_val is not None: n_vals.append(n_val)
+                                
+                                target_data = year_data if y_t_cap >= climate_year else prev_year_data
+                                y_val = get_climate_val(target_data, "tave", m_str)
+                                if y_val is not None: y_vals.append(y_val)
                             
                             if len(y_vals) == 3 and len(n_vals) == 3:
                                 row_dict['Y_3Mo_Tmean'] = round(sum(y_vals)/3, 2)
@@ -362,7 +378,6 @@ with st.expander("⚙️ Global Analysis & Outlier Settings (Affects Map & Graph
         
         plot_df = df[df['Data_Source'].isin(sel_src) & df['Species'].isin(sel_spp)].copy()
         
-        # Ensure numeric typing
         for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
             if col in plot_df.columns: plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
         for col in [c for c in plot_df.columns if c.startswith('Y_') or c.startswith('N_')]:
@@ -380,7 +395,6 @@ with st.expander("⚙️ Global Analysis & Outlier Settings (Affects Map & Graph
                 if use_outlier_filter:
                     std_devs = st.slider("Flag data outside standard deviations:", 1.0, 5.0, 2.5, 0.1)
         
-        # Calculate Outliers globally for the tabs
         plot_df['Is_Outlier'] = False
         if use_outlier_filter and len(plot_df.dropna(subset=[selected_y])) > 0:
             valid_y_df = plot_df.dropna(subset=[selected_y])
@@ -390,7 +404,6 @@ with st.expander("⚙️ Global Analysis & Outlier Settings (Affects Map & Graph
             outlier_count = plot_df['Is_Outlier'].sum()
             st.info(f"Identified **{outlier_count}** outliers (outside {mean_y:.1f} ± {std_devs*std_y:.1f}). They will be highlighted on the map and excluded from the graph trendline.")
         
-        # Create a combined label for the Map so outliers stand out
         plot_df['Map_Label'] = plot_df['Species'] + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
 
 # ==========================================
@@ -443,7 +456,6 @@ with tab3:
     else:
         valid_plot_df = plot_df.dropna(subset=[selected_x, selected_y]).copy()
         
-        # Convert boolean Is_Outlier to string for Plotly symbol mapping
         valid_plot_df['Point_Type'] = valid_plot_df['Is_Outlier'].apply(lambda x: 'Outlier' if x else 'Normal')
         
         if len(valid_plot_df) >= 2:
@@ -454,7 +466,6 @@ with tab3:
                 hover_data=['Collector', 'Year', 'DOY', 'Data_Source'], template="streamlit"
             )
             
-            # Trendline Calculation (EXCLUDING Outliers)
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
             if len(trend_df) > 1:
                 x_v, y_v = trend_df[selected_x].values, trend_df[selected_y].values
@@ -481,7 +492,6 @@ with tab4:
         row = df.loc[target_idx]
         st.markdown(f"### [🔗 Click Here to View Original Specimen Image/Page]({row['URL']})")
         
-        # Scoring Toggles
         c_s1, c_s2, c_s3 = st.columns(3)
         with c_s1: f1 = st.checkbox("🌸 Flowering", value=bool(row['Flowering']), key=f"f1_{target_idx}")
         with c_s2: f2 = st.checkbox("🍒 Fruiting", value=bool(row['Fruiting']), key=f"f2_{target_idx}")
@@ -494,8 +504,3 @@ with tab4:
             df.at[target_idx, 'Phenology_Scored'] = True
             save_with_ordered_columns(df, db_file)
             st.rerun()
-
-        st.markdown("---")
-        st.markdown("**Embedded Viewer:**")
-        # Attempt to iframe the URL
-        components.iframe(row['URL'], height=600, scrolling=True)
