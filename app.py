@@ -74,7 +74,7 @@ def pipeline_clean_and_save(new_raw_df):
 
 
 # ==========================================
-#        SIDEBAR CONTROL INTERFACE
+#      SIDEBAR: DATA INGESTION PANEL
 # ==========================================
 with st.sidebar:
     st.title("📥 Data Ingestion Panel")
@@ -86,7 +86,6 @@ with st.sidebar:
         st.markdown("### GBIF Parameters")
         species_input = st.text_input("Taxon/Species Name:", placeholder="e.g., Lithospermum ruderale")
         
-        # Restored explicit historical bounds query window
         col_yr1, col_yr2 = st.columns(2)
         with col_yr1:
             start_year = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000)
@@ -107,17 +106,19 @@ with st.sidebar:
 
     elif source_type == "📸 iNaturalist":
         st.markdown("### iNaturalist Parameters")
-        species_input_inat = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale")
+        species_input_inat = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale", key="inat_spp")
         
-        # Restored explicit historical bounds query window
         col_in1, col_in2 = st.columns(2)
         with col_in1:
-            start_yr_inat = st.number_input("Start Year :", min_value=1800, max_value=2026, value=2000)
+            start_yr_inat = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="inat_start")
         with col_in2:
-            end_yr_inat = st.number_input("End Year :", min_value=1800, max_value=2026, value=2026)
+            end_yr_inat = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="inat_end")
+            
+        # Added Record Limit for iNaturalist
+        limit_inat = st.number_input("Download Record Limit:", min_value=10, max_value=1000, value=100, step=10, key="inat_limit")
             
         if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
-            with st.spinner("Downloading community observations..."):
+            with st.spinner(f"Downloading up to {limit_inat} community observations..."):
                 # --- YOUR iNATURALIST RETRIEVAL WRAPPER PLUGGED IN HERE ---
                 raw_fetched_df = pd.DataFrame([{
                     "Data_Source": "iNaturalist", "Collector": "CitizenSci_User", "Col_Number": "", 
@@ -129,7 +130,6 @@ with st.sidebar:
     elif source_type == "✍️ Manual Data Entry":
         st.markdown("### New Specimen Attributes")
         
-        # Form interface for manual single-row input strings/floats
         m_species = st.text_input("Species Name:", placeholder="e.g., Quercus alba")
         m_collector = st.text_input("Collector's Name:")
         m_col_num = st.text_input("Collection Number / Sheet ID:")
@@ -200,8 +200,8 @@ edited_df = st.data_editor(
     }
 )
 
-# Control Buttons Block
-col_save, col_dl_clean, col_dl_full = st.columns([1, 1.2, 1.2])
+# Move the Save button to the center immediately below the table
+col_space1, col_save, col_space2 = st.columns([1, 1.5, 1])
 with col_save:
     if st.button("💾 Save Ledger Edits", type="primary", use_container_width=True):
         edited_df.to_csv(db_file, index=False)
@@ -209,19 +209,53 @@ with col_save:
         time.sleep(1)
         st.rerun()
 
-current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-with col_dl_clean:
-    clean_csv = b""
-    if os.path.exists(db_file) and not df.empty:
-        existing_main_cols = [c for c in base_headers if c in df.columns]
-        clean_csv = edited_df[existing_main_cols].to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 Download Clean Ledger", data=clean_csv, file_name=f"herbarium_clean_{current_time}.csv", mime="text/csv", use_container_width=True, disabled=(len(clean_csv)==0))
 
-with col_dl_full:
+# ==========================================
+#      SIDEBAR: EXPORT & DOWNLOAD PANEL
+# ==========================================
+# We define this down here so the buttons have access to the freshly "edited_df"
+with st.sidebar:
+    st.markdown("---")
+    st.title("💾 Export Database")
+    st.write("Download your active ledger.")
+    
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean_csv = b""
     full_csv_bytes = b""
-    if os.path.exists(db_file) and not df.empty:
+    
+    if not edited_df.empty:
+        existing_main_cols = [c for c in base_headers if c in edited_df.columns]
+        # Excel compatibility fix retained
+        clean_csv = edited_df[existing_main_cols].to_csv(index=False).encode('utf-8-sig')
         full_csv_bytes = edited_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📦 Download Full CSV (with Climate)", data=full_csv_bytes, file_name=f"herbarium_full_{current_time}.csv", mime="text/csv", use_container_width=True, disabled=(len(full_csv_bytes)==0))
+        
+    st.download_button(
+        label="📥 Download Clean Ledger", 
+        data=clean_csv, 
+        file_name=f"herbarium_clean_{current_time}.csv", 
+        mime="text/csv", 
+        use_container_width=True, 
+        disabled=(len(clean_csv)==0)
+    )
+
+    st.download_button(
+        label="📦 Download Full CSV (with Climate)", 
+        data=full_csv_bytes, 
+        file_name=f"herbarium_full_{current_time}.csv", 
+        mime="text/csv", 
+        use_container_width=True, 
+        disabled=(len(full_csv_bytes)==0)
+    )
+    
+    st.markdown("---")
+    with st.expander("⚠️ Danger Zone"):
+        if st.button("Wipe Entire Database", type="secondary", use_container_width=True):
+            if os.path.exists(db_file):
+                pd.read_csv(db_file).to_csv(f"herbarium_backup_{current_time}.csv", index=False)
+            pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
+            st.success("Database cleared!")
+            time.sleep(1)
+            st.rerun()
 
 
 # ==========================================
@@ -276,13 +310,3 @@ else:
             st.plotly_chart(fig_pheno, use_container_width=True)
     else:
         st.warning("Ensure rows possess valid values for Year and DOY markers to construct figures.")
-
-# Wipe database panel
-with st.expander("⚠️ Danger Zone"):
-    if st.button("Wipe Entire Database", type="secondary"):
-        if os.path.exists(db_file):
-            pd.read_csv(db_file).to_csv(f"herbarium_backup_{current_time}.csv", index=False)
-        pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
-        st.success("Database cleared! Reloading dashboard views...")
-        time.sleep(1)
-        st.rerun()
