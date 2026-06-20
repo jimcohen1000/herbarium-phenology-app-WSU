@@ -40,16 +40,24 @@ def get_elevation(lat, lon):
 def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None: 
         return {} 
-    # THE FIX: Reverted strictly to http://. The API server fails SSL checks on https://
+    
     base = "http://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    
     try:
         res = requests.get(url, timeout=10)
+        
+        # Check for standard API rate limit codes or messages
+        if res.status_code == 429 or "limit" in res.text.lower():
+            return {"_LIMIT_REACHED": True}
+            
         if res.status_code == 200:
             data = res.json()
             return data[0] if isinstance(data, list) else data
+            
     except Exception as e:
         print("ClimateNA error:", e)
+        
     return {}
 
 
@@ -103,6 +111,8 @@ def pipeline_enrich_and_save(raw_df, target_limit):
     progress_bar = st.sidebar.progress(0)
     status_text = st.sidebar.empty()
     
+    limit_reached_flag = False  # Track if we've hit the ClimateNA limit
+    
     # Fetch Elevation and Climate NA for the surviving records
     for i, row in cleaned_df.iterrows():
         row_dict = row.to_dict()
@@ -118,13 +128,26 @@ def pipeline_enrich_and_save(raw_df, target_limit):
             
             # 2. Fetch Climate Data
             if el is not None and not pd.isna(el):
-                status_text.text(f"Fetching ClimateNA for {int(year)}... ({i+1}/{len(cleaned_df)})")
-                year_data = get_climate_data(lat, lon, el, f"Year_{int(year)}")
-                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
-                
-                # Append new columns to the dictionary 
-                for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
-                for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
+                if limit_reached_flag:
+                    # Skip fetching to save time, but keep processing the record
+                    pass 
+                else:
+                    status_text.text(f"Fetching ClimateNA for {int(year)}... ({i+1}/{len(cleaned_df)})")
+                    year_data = get_climate_data(lat, lon, el, f"Year_{int(year)}")
+                    
+                    if year_data.get("_LIMIT_REACHED"):
+                        st.sidebar.error("⚠️ ClimateNA 50-request limit reached! Adding remaining records without climate data.")
+                        limit_reached_flag = True
+                    else:
+                        norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                        
+                        if norm_data.get("_LIMIT_REACHED"):
+                            st.sidebar.error("⚠️ ClimateNA 50-request limit reached! Adding remaining records without climate data.")
+                            limit_reached_flag = True
+                        else:
+                            # Append new columns to the dictionary safely
+                            for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
+                            for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
                 
         records.append(row_dict)
         progress_bar.progress((i + 1) / len(cleaned_df))
@@ -142,8 +165,8 @@ def pipeline_enrich_and_save(raw_df, target_limit):
         new_order += [c for c in combined_df.columns if c not in new_order]
         
         combined_df[new_order].to_csv(db_file, index=False)
-        st.sidebar.success(f"Added {len(final_new_df)} fully processed climate records!")
-        time.sleep(1.5)
+        st.sidebar.success(f"Added {len(final_new_df)} processed records!")
+        time.sleep(2)
         st.rerun()
 
 
