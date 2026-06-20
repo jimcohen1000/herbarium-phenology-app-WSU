@@ -445,6 +445,9 @@ with c2:
     # Generate a unique timestamp for filenames
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Generate a unique timestamp for filenames
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     with col_dl_clean:
         # Prepare a clean spreadsheet containing only the main visible tracking columns
         if os.path.exists(db_file):
@@ -470,10 +473,13 @@ with c2:
         )
 
     with col_dl_full:
-        # Read the raw full file directly from the disk to bypass Streamlit render lag
+        # Use the exact same reliable Pandas pipeline, but keep all 500+ climate columns
         if os.path.exists(db_file):
-            with open(db_file, "rb") as f:
-                full_csv_bytes = f.read()
+            try:
+                full_df = pd.read_csv(db_file)
+                full_csv_bytes = full_df.to_csv(index=False).encode('utf-8')
+            except Exception:
+                full_csv_bytes = b""
         else:
             full_csv_bytes = b""
             
