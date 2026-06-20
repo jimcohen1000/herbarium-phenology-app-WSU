@@ -358,13 +358,15 @@ with c2:
         
     st.write("---")
     
-    # --- TABLE SECTION ---
+   # --- TABLE SECTION ---
     st.subheader("📋 Formatted Database Ledger")
     if not df.empty:
         df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
             
+    # Added key="herbarium_ledger" to protect data from vanishing on reruns
     edited_df = st.data_editor(
         df, 
+        key="herbarium_ledger",
         use_container_width=True, hide_index=True, num_rows="dynamic", 
         column_config={
             "Year": st.column_config.NumberColumn("Year", format="%d"),
@@ -389,9 +391,13 @@ with c2:
             st.rerun()
 
     with col_dl:
-        # Pulls live from the editor and encodes to bytes to prevent truncation
-        csv_data = edited_df.to_csv(index=False).encode('utf-8')
-        
+        # Read directly from the persistent disk file to completely prevent data truncation
+        try:
+            with open(db_file, "r", encoding="utf-8") as f:
+                csv_data = f.read()
+        except Exception:
+            csv_data = ""
+
         st.download_button(
             label="📥 Download Full CSV", 
             data=csv_data, 
