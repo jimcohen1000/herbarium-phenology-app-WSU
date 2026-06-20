@@ -3,8 +3,8 @@ import pandas as pd
 import os
 import time
 import requests
-import random
-from datetime import datetime, date
+import urllib.parse
+from datetime import datetime
 import plotly.express as px
 
 # --- CONFIGURATION & SETUP ---
@@ -22,7 +22,7 @@ if not os.path.exists(db_file):
 
 
 # ==========================================
-#         API FETCHING HELPERS
+#         REAL API & CLIMATE HOOKS
 # ==========================================
 
 def get_elevation(lat, lon):
@@ -33,22 +33,22 @@ def get_elevation(lat, lon):
             elevations = res.json().get('elevation')
             if elevations and len(elevations) > 0:
                 return float(elevations[0])
-    except Exception:
-        pass
+    except Exception as e:
+        print("Elevation error:", e)
     return None
 
 def get_climate_data(lat, lon, el, prd):
-    if el is None: 
+    if pd.isna(el) or el is None: 
         return {} 
-    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    base = "http://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             return data[0] if isinstance(data, list) else data
-    except Exception:
-        pass
+    except Exception as e:
+        print("ClimateNA error:", e)
     return {}
 
 
@@ -68,78 +68,76 @@ def remove_duplicate_collections(df):
         df = pd.concat([clean_has_col, no_col_num], ignore_index=True)
     return df
 
-def thin_data_by_year(df, max_per_year=3):
-    if df.empty or 'Year' not in df.columns: return df
-    df = df.copy()
-    df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
-    has_year = df[df['Year'].notna()].copy()
-    no_year = df[df['Year'].isna()]
-    has_year['Year'] = has_year['Year'].astype(int)
-    thinned_has_year = has_year.groupby('Year', group_keys=False).apply(
-        lambda x: x.sample(n=min(len(x), max_per_year), random_state=42)
-    )
-    return pd.concat([thinned_has_year, no_year], ignore_index=True)
+def thin_and_cap_data(df, target_limit, max_per_year=3):
+    """Filters duplicates, caps at 3 per year, and returns exactly the target limit."""
+    if df.empty: return df
+    
+    # 1. Strip identical sheets
+    df = remove_duplicate_collections(df)
+    
+    # 2. Flatten temporal clustering
+    if 'Year' in df.columns:
+        df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
+        has_year = df[df['Year'].notna()].copy()
+        no_year = df[df['Year'].isna()]
+        
+        has_year['Year'] = has_year['Year'].astype(int)
+        thinned = has_year.groupby('Year', group_keys=False).apply(
+            lambda x: x.sample(n=min(len(x), max_per_year), random_state=42)
+        )
+        df = pd.concat([thinned, no_year], ignore_index=True)
+        
+    # 3. Return exactly the amount the user asked for
+    return df.head(target_limit).reset_index(drop=True)
 
-def pipeline_clean_and_fetch_climate(new_raw_df):
-    """Filters duplicates, limits by year, THEN fetches climate data for the survivors."""
-    if new_raw_df.empty:
-        st.sidebar.warning("No data found to process.")
+def pipeline_enrich_and_save(raw_df, target_limit):
+    if raw_df.empty:
+        st.sidebar.warning("No records found in that date range.")
         return
 
-    st.sidebar.text("Cleaning duplicates & thinning years...")
-    cleaned_df = remove_duplicate_collections(new_raw_df)
-    cleaned_df = thin_data_by_year(cleaned_df, max_per_year=3)
+    st.sidebar.text("Applying de-clustering filters...")
+    cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=3)
     
-    records = []
-    api_limit_hit = False
     progress_bar = st.sidebar.progress(0)
     status_text = st.sidebar.empty()
     
+    # Fetch Elevation and Climate NA for the surviving records
     for i, row in cleaned_df.iterrows():
-        if api_limit_hit: break
-        
-        row_dict = row.to_dict()
-        lat, lon = row_dict.get('Latitude'), row_dict.get('Longitude')
-        year, el = row_dict.get('Year'), row_dict.get('Elevation')
+        lat, lon = row.get('Latitude'), row.get('Longitude')
+        year, el = row.get('Year'), row.get('Elevation')
         
         if pd.notna(lat) and pd.notna(lon) and pd.notna(year):
             # 1. Fetch Elevation if missing
             if pd.isna(el) or el == "" or el == 0:
                 status_text.text(f"Fetching elevation... ({i+1}/{len(cleaned_df)})")
                 el = get_elevation(lat, lon)
-                row_dict['Elevation'] = el
+                cleaned_df.at[i, 'Elevation'] = el
             
             # 2. Fetch Climate Data
-            if el is not None:
+            if pd.notna(el):
                 status_text.text(f"Fetching ClimateNA for {int(year)}... ({i+1}/{len(cleaned_df)})")
                 year_data = get_climate_data(lat, lon, el, f"Year_{int(year)}")
                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                 
-                if not year_data and not norm_data:
-                    st.sidebar.warning("ClimateNA API limit reached! Saving partial batch.")
-                    api_limit_hit = True
-                    break
+                for k, v in year_data.items(): cleaned_df.at[i, f"Y_{k}"] = v
+                for k, v in norm_data.items(): cleaned_df.at[i, f"N_{k}"] = v
                 
-                for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
-                for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
-                
-        records.append(row_dict)
         progress_bar.progress((i + 1) / len(cleaned_df))
         
     status_text.text("Finished processing pipeline!")
-    if records:
-        final_new_df = pd.DataFrame(records)
-        master_df = pd.read_csv(db_file)
-        combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
-        
-        # Sort columns to keep base headers first
-        new_order = [c for c in base_headers if c in combined_df.columns]
-        new_order += [c for c in combined_df.columns if c not in new_order]
-        
-        combined_df[new_order].to_csv(db_file, index=False)
-        st.sidebar.success(f"Added {len(records)} fully processed climate records!")
-        time.sleep(1.5)
-        st.rerun()
+    
+    # Save to master database
+    master_df = pd.read_csv(db_file)
+    combined_df = pd.concat([master_df, cleaned_df], ignore_index=True)
+    
+    # Ensure base tracking columns stay on the left side
+    new_order = [c for c in base_headers if c in combined_df.columns]
+    new_order += [c for c in combined_df.columns if c not in new_order]
+    
+    combined_df[new_order].to_csv(db_file, index=False)
+    st.sidebar.success(f"Added {len(cleaned_df)} fully processed climate records!")
+    time.sleep(1.5)
+    st.rerun()
 
 
 # ==========================================
@@ -148,9 +146,8 @@ def pipeline_clean_and_fetch_climate(new_raw_df):
 with st.sidebar:
     st.title("📥 Data Entry")
     
-    # --- GBIF REAL API LOGIC ---
     with st.expander("🌐 Fetch from GBIF", expanded=False):
-        gbif_spp = st.text_input("Species Name (GBIF):", placeholder="e.g., Anemone patens")
+        gbif_spp = st.text_input("Species Name (GBIF):", placeholder="e.g., Lithospermum ruderale", key="g_spp")
         col_yr1, col_yr2 = st.columns(2)
         with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start")
         with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end")
@@ -158,79 +155,72 @@ with st.sidebar:
         
         if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
             with st.spinner("Querying GBIF..."):
-                raw_records = []
-                available_years = list(range(int(g_start), int(g_end) + 1))
-                random_years = random.choices(available_years, k=g_limit * 4)
+                spp_encoded = urllib.parse.quote(gbif_spp)
+                # Over-fetch massive pool (limit * 5) to allow mathematical thinning down to requested limit
+                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit={g_limit * 5}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
                 
-                for y in random_years:
-                    if len(raw_records) >= g_limit: break
-                    url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&year={y}&decimalLatitude=15,83&decimalLongitude=-170,-50&limit=5"
-                    try:
-                        res = requests.get(url, timeout=5)
-                        if res.status_code == 200:
-                            data = res.json().get('results', [])
-                            for obs in data:
-                                if len(raw_records) >= g_limit: break
-                                rec_url = obs.get('references', '')
-                                if not rec_url and obs.get('media'): rec_url = obs.get('media')[0].get('identifier', '')
-                                
-                                raw_records.append({
-                                    "Data_Source": "Digitized Herbarium",
-                                    "Collector": obs.get('recordedBy', ''),
-                                    "Col_Number": obs.get('recordNumber', ''),
-                                    "Barcode": obs.get('catalogNumber', ''),
-                                    "Species": obs.get('species', gbif_spp),
-                                    "Year": int(obs.get('year', y)),
-                                    "DOY": datetime(int(obs.get('year', y)), int(obs.get('month', 1)), int(obs.get('day', 1))).timetuple().tm_yday if obs.get('month') and obs.get('day') else pd.NA,
-                                    "Latitude": obs.get('decimalLatitude'),
-                                    "Longitude": obs.get('decimalLongitude'),
-                                    "Elevation": obs.get('elevation', pd.NA),
-                                    "URL": rec_url,
-                                    "Flowering": False, "Fruiting": False, "Vegetative": False
-                                })
-                    except Exception: pass
-                pipeline_clean_and_fetch_climate(pd.DataFrame(raw_records))
+                raw_records = []
+                try:
+                    res = requests.get(url, timeout=10)
+                    if res.status_code == 200:
+                        for obs in res.json().get('results', []):
+                            rec_url = obs.get('references', '')
+                            if not rec_url and obs.get('media'): rec_url = obs.get('media')[0].get('identifier', '')
+                            
+                            raw_records.append({
+                                "Data_Source": "Digitized Herbarium",
+                                "Collector": obs.get('recordedBy', ''),
+                                "Col_Number": obs.get('recordNumber', ''),
+                                "Barcode": obs.get('catalogNumber', ''),
+                                "Species": obs.get('species', gbif_spp),
+                                "Year": obs.get('year', pd.NA),
+                                "DOY": datetime(int(obs['year']), int(obs['month']), int(obs['day'])).timetuple().tm_yday if obs.get('month') and obs.get('day') else pd.NA,
+                                "Latitude": obs.get('decimalLatitude'),
+                                "Longitude": obs.get('decimalLongitude'),
+                                "Elevation": obs.get('elevation', pd.NA),
+                                "URL": rec_url,
+                                "Flowering": False, "Fruiting": False, "Vegetative": False
+                            })
+                except Exception as e:
+                    st.sidebar.error(f"GBIF Error: {e}")
+                
+                pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=g_limit)
 
-    # --- INATURALIST REAL API LOGIC ---
     with st.expander("📸 Fetch from iNaturalist", expanded=False):
-        inat_spp = st.text_input("Species Name (iNat):", placeholder="e.g., Anemone patens")
+        inat_spp = st.text_input("Species Name (iNat):", placeholder="e.g., Lithospermum ruderale", key="i_spp")
         col_in1, col_in2 = st.columns(2)
         with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start")
         with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end")
-        i_limit = st.number_input("iNat Record Limit:", min_value=5, max_value=200, value=25, step=5)
+        i_limit = st.number_input("iNat Record Limit:", min_value=5, max_value=200, value=25, step=5, key="i_lim")
             
         if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
-            with st.spinner(f"Downloading up to {i_limit} observations..."):
-                raw_records = []
-                available_years = list(range(int(i_start), int(i_end) + 1))
-                random_years = random.choices(available_years, k=i_limit * 4)
+            with st.spinner(f"Downloading observations..."):
+                spp_encoded = urllib.parse.quote(inat_spp)
+                url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page={i_limit * 5}&quality_grade=research"
                 
-                for y in random_years:
-                    if len(raw_records) >= i_limit: break
-                    url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&d1={y}-01-01&d2={y}-12-31&nelat=83&nelng=-50&swlat=15&swlng=-170&per_page=5"
-                    try:
-                        res = requests.get(url, timeout=5)
-                        if res.status_code == 200:
-                            data = res.json().get('results', [])
-                            for obs in data:
-                                if len(raw_records) >= i_limit: break
-                                if obs.get('location') and obs.get('observed_on'):
-                                    lat_str, lon_str = obs['location'].split(',')
-                                    dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
-                                    raw_records.append({
-                                        "Data_Source": "iNaturalist",
-                                        "Collector": obs.get('user', {}).get('login', ''),
-                                        "Species": obs.get('taxon', {}).get('name', inat_spp),
-                                        "Year": dt.year, "DOY": dt.timetuple().tm_yday,
-                                        "Latitude": float(lat_str), "Longitude": float(lon_str),
-                                        "Elevation": pd.NA,
-                                        "URL": obs.get('uri', ""),
-                                        "Flowering": False, "Fruiting": False, "Vegetative": False
-                                    })
-                    except Exception: pass
-                pipeline_clean_and_fetch_climate(pd.DataFrame(raw_records))
+                raw_records = []
+                try:
+                    res = requests.get(url, timeout=10)
+                    if res.status_code == 200:
+                        for obs in res.json().get('results', []):
+                            if obs.get('location') and obs.get('observed_on'):
+                                lat_str, lon_str = obs['location'].split(',')
+                                dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
+                                raw_records.append({
+                                    "Data_Source": "iNaturalist",
+                                    "Collector": obs.get('user', {}).get('login', ''),
+                                    "Species": obs.get('taxon', {}).get('name', inat_spp),
+                                    "Year": dt.year, "DOY": dt.timetuple().tm_yday,
+                                    "Latitude": float(lat_str), "Longitude": float(lon_str),
+                                    "Elevation": pd.NA,
+                                    "URL": obs.get('uri', ""),
+                                    "Flowering": False, "Fruiting": False, "Vegetative": False
+                                })
+                except Exception as e:
+                    st.sidebar.error(f"iNaturalist Error: {e}")
+                    
+                pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=i_limit)
 
-    # --- MANUAL ENTRY FORM ---
     with st.expander("✍️ Manual Data Entry", expanded=False):
         m_species = st.text_input("Species Name:", placeholder="e.g., Quercus alba")
         m_collector = st.text_input("Collector's Name:")
@@ -242,7 +232,7 @@ with st.sidebar:
         col_m3, col_m4, col_m5 = st.columns(3)
         with col_m3: m_lat = st.number_input("Latitude (°N):", format="%.5f", value=40.0)
         with col_m4: m_lon = st.number_input("Longitude (°W):", format="%.5f", value=-111.0)
-        with col_m5: m_elev = st.number_input("Elevation (m):", value=0)
+        with col_m5: m_elev = st.number_input("Elevation (m):", value=0.0)
         m_url = st.text_input("Image/Record URL:")
         col_p1, col_p2, col_p3 = st.columns(3)
         with col_p1: m_flowering = st.checkbox("Flowering")
@@ -254,11 +244,10 @@ with st.sidebar:
                 "Data_Source": "Manual_Entry", "Collector": m_collector, "Col_Number": m_col_num,
                 "Barcode": m_barcode, "Species": m_species, "DOY": m_doy, "Year": m_year,
                 "Flowering": m_flowering, "Fruiting": m_fruiting, "Vegetative": m_vegetative,
-                "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev if m_elev != 0 else pd.NA, 
+                "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev if m_elev != 0.0 else pd.NA, 
                 "URL": m_url
             }])
-            # Passing it to the pipeline automatically fetches its climate/elevation!
-            pipeline_clean_and_fetch_climate(new_row_df)
+            pipeline_enrich_and_save(new_row_df, target_limit=1)
 
     st.markdown("---")
     st.title("💾 Export Database")
