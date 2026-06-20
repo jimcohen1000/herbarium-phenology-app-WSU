@@ -12,6 +12,10 @@ import os
 # ==========================================
 st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
+# Persistent memory for the API limit warning
+if "climate_limit_hit" not in st.session_state:
+    st.session_state.climate_limit_hit = False
+
 db_file = "specimen_ledger.csv"
 base_headers = [
     "Data_Source", "Collector", "Col_Number", "Barcode", "Species",
@@ -51,10 +55,18 @@ def get_climate_data(lat, lon, el, period):
     params = {"lat": lat, "lon": lon, "el": el, "period": period}
     try:
         res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            return res.json()
-        elif res.status_code == 429: # API limit reached
+        
+        # Catch both 429 (Too Many Requests) and 403 (Forbidden/Limit Exceeded)
+        if res.status_code in [429, 403]: 
             return {"_LIMIT_REACHED": True}
+            
+        elif res.status_code == 200:
+            data = res.json()
+            # Failsafe if the API sends a 200 OK but includes an error message
+            if isinstance(data, dict) and "limit" in str(data.get("error", "")).lower():
+                return {"_LIMIT_REACHED": True}
+            return data
+            
     except: pass
     return {}
 
@@ -80,10 +92,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
     
-    limit_reached_flag = False 
+    # Check session state before we even start
+    limit_reached_flag = st.session_state.climate_limit_hit 
     
-    # We use enumerate() here to get a clean 0, 1, 2 counter (count) 
-    # instead of relying on the dataframe's index (idx)
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         row_dict = row.to_dict()
         
@@ -113,11 +124,12 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                     year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
                     
                     if year_data.get("_LIMIT_REACHED"):
-                        st.sidebar.error("⚠️ ClimateNA 50-request limit reached! Adding remaining records without climate data.")
+                        st.session_state.climate_limit_hit = True
                         limit_reached_flag = True
                     elif year_data: 
                         norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                         if norm_data.get("_LIMIT_REACHED"):
+                            st.session_state.climate_limit_hit = True
                             limit_reached_flag = True
                         else:
                             for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
@@ -156,6 +168,13 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
 #        SIDEBAR: DATA ENTRY
 # ==========================================
 st.sidebar.header("Data Entry & Ingestion")
+
+# Check and display the API limit warning persistently right at the top of the sidebar
+if st.session_state.climate_limit_hit:
+    st.sidebar.error("⚠️ **ClimateNA Limit Reached!**\n\nYou have exceeded the 50 queries per hour limit. Wait a while before querying more. New records will be added without climate fields in the meantime.")
+    if st.sidebar.button("Dismiss Warning", type="primary"):
+        st.session_state.climate_limit_hit = False
+        st.rerun()
 
 with st.sidebar.expander("✏️ Manual Entry", expanded=False):
     with st.form("manual_entry_form"):
