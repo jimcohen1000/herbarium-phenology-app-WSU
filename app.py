@@ -50,7 +50,6 @@ def get_elevation(lat, lon):
     return None
 
 def get_climate_data(lat, lon, el, period):
-    # Reverted to the correct ClimateNA API endpoint
     url = "https://climatena.ca/api/data/AnyPoint"
     params = {
         "lat": lat, "lon": lon, "el": el, 
@@ -227,7 +226,6 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
     col_yr1, col_yr2 = st.columns(2)
-    # Added unique keys to the GBIF number inputs
     with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start_yr")
     with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end_yr")
     col_lim1, col_lim2 = st.columns(2)
@@ -275,7 +273,6 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     inat_spp = st.text_input("Species Name (iNat):", key="i_spp")
     col_in1, col_in2 = st.columns(2)
-    # Added unique keys to the iNaturalist number inputs
     with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start_yr")
     with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end_yr")
     col_ilim1, col_ilim2 = st.columns(2)
@@ -322,26 +319,16 @@ if st.sidebar.button("🗑️ Clear Entire Database"):
 # ==========================================
 st.title("🌱 Phenology & Climate Dataset Builder")
 
+# Load the full database
 df = pd.read_csv(db_file)
 
-# Dynamic Source Filter
-available_sources = df['Data_Source'].dropna().unique().tolist()
-if not available_sources:
-    available_sources = ["GBIF Herbarium", "iNaturalist", "Manual Entry"]
-
-st.markdown("### Filter Data Sources")
-selected_sources = st.multiselect(
-    "Select which data sources to view in the ledger and graphs:",
-    options=available_sources,
-    default=available_sources
-)
-
-filtered_df = df[df['Data_Source'].isin(selected_sources)]
-
 st.write("---")
-st.subheader("Data Ledger")
+st.subheader("Data Ledger (Full Dataset)")
+st.info("This ledger displays your entire CSV. Any edits saved here apply to the master database.")
+
+# Always display the FULL dataframe here
 edited_df = st.data_editor(
-    filtered_df, 
+    df, 
     num_rows="dynamic",
     use_container_width=True,
     column_config={
@@ -355,10 +342,10 @@ col_btn1, col_btn2 = st.columns([1, 4])
 with col_btn1:
     if st.button("💾 Save Manual Edits", type="primary"):
         edited_df.to_csv(db_file, index=False)
-        st.success("Changes saved successfully!")
+        st.success("Master database updated successfully!")
 with col_btn2:
     st.download_button(
-        label="📥 Download Dataset (CSV)",
+        label="📥 Download Full Dataset (CSV)",
         data=edited_df.to_csv(index=False).encode('utf-8'),
         file_name="phenology_dataset.csv",
         mime="text/csv",
@@ -370,22 +357,37 @@ with col_btn2:
 st.write("---")
 st.subheader("📊 Dynamic Data Explorer")
 
-if filtered_df.empty:
-    st.info("The ledger is currently empty for the selected data sources.")
+if edited_df.empty:
+    st.info("The ledger is currently empty. Add data to view graphs.")
 else:
-    # Get available species for filtering
+    # Ensure Data_Source is safely handled for graphing symbols
+    edited_df['Data_Source'] = edited_df['Data_Source'].fillna('Unknown')
+    
+    available_sources = edited_df['Data_Source'].unique().tolist()
     available_species = edited_df['Species'].dropna().unique().tolist()
     
-    st.markdown("### Graphing Options")
+    st.markdown("### Graphing Options & Filters")
+    st.markdown("Filter the data specifically for the plot below without deleting it from your master ledger.")
     
-    # Species Filter
-    selected_species = st.multiselect(
-        "Filter by Species:",
-        options=available_species,
-        default=available_species
-    )
+    col_filt1, col_filt2 = st.columns(2)
+    with col_filt1:
+        selected_sources = st.multiselect(
+            "Filter by Data Source:",
+            options=available_sources,
+            default=available_sources
+        )
+    with col_filt2:
+        selected_species = st.multiselect(
+            "Filter by Species:",
+            options=available_species,
+            default=available_species
+        )
     
-    plot_df = edited_df[edited_df['Species'].isin(selected_species)].copy()
+    # Filter only for the graph
+    plot_df = edited_df[
+        edited_df['Data_Source'].isin(selected_sources) & 
+        edited_df['Species'].isin(selected_species)
+    ].copy()
     
     for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
         if col in plot_df.columns:
