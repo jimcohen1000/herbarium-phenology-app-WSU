@@ -40,7 +40,8 @@ def get_elevation(lat, lon):
 def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None: 
         return {} 
-    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    # THE FIX: Reverted strictly to http://. The API server fails SSL checks on https://
+    base = "http://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
         res = requests.get(url, timeout=10)
@@ -104,7 +105,6 @@ def pipeline_enrich_and_save(raw_df, target_limit):
     
     # Fetch Elevation and Climate NA for the surviving records
     for i, row in cleaned_df.iterrows():
-        # REVERTED FIX: Building a dictionary is strictly safer for dynamic pandas columns
         row_dict = row.to_dict()
         lat, lon = row_dict.get('Latitude'), row_dict.get('Longitude')
         year, el = row_dict.get('Year'), row_dict.get('Elevation')
