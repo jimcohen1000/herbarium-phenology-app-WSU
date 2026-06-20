@@ -119,7 +119,7 @@ with c1:
                 df_combined = pd.concat([df_existing, pd.DataFrame([row])], ignore_index=True)
                 save_with_ordered_columns(df_combined, db_file)
                 st.success("Entry saved!")
-                st.rerun()
+                # st.rerun()
 
     # --- TAB 2: INATURALIST BATCH IMPORT ---
     with tab2:
