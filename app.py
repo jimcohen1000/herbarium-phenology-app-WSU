@@ -26,7 +26,6 @@ if not os.path.exists(db_file):
 # ==========================================
 
 def safe_float(val):
-    """Safely converts Pandas NAs, None, and text 'nan' to a usable None."""
     try:
         if pd.isna(val) or str(val).strip().lower() in ["", "nan", "none", "<na>"]:
             return None
@@ -46,36 +45,41 @@ def safe_int(val):
 def get_elevation(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
-        res = requests.get(url, timeout=5)
+        headers = {"User-Agent": "HerbariumLedger/1.0"}
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            elevations = res.json().get('elevation')
-            if elevations and len(elevations) > 0:
-                return float(elevations[0])
+            data = res.json()
+            if "elevation" in data:
+                el_data = data["elevation"]
+                if isinstance(el_data, list) and len(el_data) > 0:
+                    return float(el_data[0])
+                elif isinstance(el_data, (int, float)):
+                    return float(el_data)
     except Exception as e:
-        print("Elevation error:", e)
+        print(f"Elevation Error: {e}")
     return None
 
 def get_climate_data(lat, lon, el, prd):
-    if el is None: 
-        return {} 
-    
+    # ClimateNA fallback: always provide an integer elevation, defaulting to 0 if missing
+    el_val = int(float(el)) if el is not None else 0 
     base = "http://api.climatena.ca/api/cnaApi6/LatLonEl"
-    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el_val}&prd={prd}&varYSM=YSM"
     
     try:
-        res = requests.get(url, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=15)
         
         if res.status_code == 429 or "limit" in res.text.lower():
             return {"_LIMIT_REACHED": True}
             
         if res.status_code == 200:
             data = res.json()
-            if isinstance(data, list):
-                return data[0] if len(data) > 0 else {}
-            return data
-            
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            elif isinstance(data, dict):
+                return data
     except Exception as e:
-        print("ClimateNA error:", e)
+        print(f"ClimateNA Error: {e}")
         
     return {}
 
@@ -84,33 +88,23 @@ def get_climate_data(lat, lon, el, prd):
 #         DATA PIPELINE FUNCTIONS
 # ==========================================
 
-def remove_duplicate_collections(df):
-    if df.empty: return df
-    df = df.copy()
-    if 'Col_Number' in df.columns:
-        df['Col_Number'] = df['Col_Number'].astype(str).replace(['nan', 'None', '<NA>', ''], pd.NA)
-        has_col_num = df[df['Col_Number'].notna()]
-        no_col_num = df[df['Col_Number'].isna()]
-        subset_cols = ['Collector', 'Col_Number'] if 'Collector' in df.columns else ['Col_Number']
-        clean_has_col = has_col_num.drop_duplicates(subset=subset_cols, keep='first')
-        df = pd.concat([clean_has_col, no_col_num], ignore_index=True)
-    return df
-
 def thin_and_cap_data(df, target_limit, max_per_year=3):
+    """Safely deduplicates and caps data without using .apply() which drops columns."""
     if df.empty: return df
-    df = remove_duplicate_collections(df)
     
+    # 1. Deduplicate based on standard fields
+    if 'Collector' in df.columns and 'Col_Number' in df.columns:
+        df['Col_Number'] = df['Col_Number'].fillna('')
+        df = df.drop_duplicates(subset=['Collector', 'Col_Number'], keep='first')
+        
+    # 2. Safely Thin by Year (Native Pandas approach)
     if 'Year' in df.columns:
-        df['Year'] = pd.to_numeric(df['Year'], errors='coerce')
-        has_year = df[df['Year'].notna()].copy()
-        no_year = df[df['Year'].isna()]
-        has_year['Year'] = has_year['Year'].astype(int)
-        thinned = has_year.groupby('Year', group_keys=False).apply(
-            lambda x: x.sample(n=min(len(x), max_per_year))
-        )
-        df = pd.concat([thinned, no_year], ignore_index=True)
+        # Randomize rows to get a true sample, then take the first N per group
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+        df = df.groupby('Year', dropna=False).head(max_per_year)
         
     return df.head(target_limit).reset_index(drop=True)
+
 
 def pipeline_enrich_and_save(raw_df, target_limit):
     if raw_df.empty:
@@ -134,18 +128,21 @@ def pipeline_enrich_and_save(raw_df, target_limit):
         year = safe_int(row_dict.get('Year'))
         el = safe_float(row_dict.get('Elevation'))
         
-        # Explicitly lock in the year to prevent Pandas from dropping it
+        # Enforce clean Year assignment
         row_dict['Year'] = year if year is not None else pd.NA
         
-        if lat is not None and lon is not None and year is not None:
-            # 1. Fetch Elevation if missing or exactly 0.0
-            if el is None or el == 0.0:
+        if lat is not None and lon is not None:
+            # 1. Fetch Elevation (Does NOT require Year to be present anymore)
+            if el is None or el == 0.0 or pd.isna(el):
                 status_text.text(f"Fetching elevation... ({i+1}/{len(cleaned_df)})")
-                el = get_elevation(lat, lon)
+                fetched_el = get_elevation(lat, lon)
+                el = fetched_el if fetched_el is not None else 0.0 # Failsafe so ClimateNA runs
+                row_dict['Elevation'] = el
+            else:
                 row_dict['Elevation'] = el
             
-            # 2. Fetch Climate Data
-            if el is not None:
+            # 2. Fetch Climate Data (Requires Lat, Lon, and Year)
+            if year is not None:
                 if not limit_reached_flag:
                     climate_year = min(year, 2022)
                     status_text.text(f"Fetching ClimateNA for {climate_year}... ({i+1}/{len(cleaned_df)})")
@@ -157,7 +154,6 @@ def pipeline_enrich_and_save(raw_df, target_limit):
                     elif year_data: 
                         norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                         if norm_data.get("_LIMIT_REACHED"):
-                            st.sidebar.error("⚠️ ClimateNA limit reached on Normals fetch!")
                             limit_reached_flag = True
                         else:
                             for k, v in year_data.items(): row_dict[f"Y_{k}"] = v
@@ -172,13 +168,14 @@ def pipeline_enrich_and_save(raw_df, target_limit):
         final_new_df = pd.DataFrame(records)
         master_df = pd.read_csv(db_file)
         
-        # Force all base headers to exist to prevent missing columns in CSV
+        # Force all base headers to exist so Pandas doesn't ignore empty columns
         for col in base_headers:
             if col not in final_new_df.columns: final_new_df[col] = pd.NA
             if col not in master_df.columns: master_df[col] = pd.NA
             
         combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
         
+        # Sort columns to keep standard structure first
         new_order = [c for c in base_headers if c in combined_df.columns]
         new_order += [c for c in combined_df.columns if c not in new_order]
         
@@ -215,14 +212,20 @@ with st.sidebar:
                             rec_url = obs.get('references', '')
                             if not rec_url and obs.get('media'): rec_url = obs.get('media')[0].get('identifier', '')
                             
-                            # Safely extract DOY and Year to avoid KeyErrors
-                            y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
+                            # Extremely safe date extraction
+                            y = obs.get('year')
+                            m = obs.get('month')
+                            d = obs.get('day')
                             doy = pd.NA
+                            
+                            # Fallback if GBIF hides year in eventDate string
+                            if not y and obs.get('eventDate'):
+                                try: y = int(obs['eventDate'][:4])
+                                except: pass
+
                             if y and m and d:
-                                try:
-                                    doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
-                                except:
-                                    pass
+                                try: doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
+                                except: pass
                             
                             raw_records.append({
                                 "Data_Source": "Digitized Herbarium",
@@ -364,7 +367,7 @@ edited_df = st.data_editor(
     df, 
     width="stretch", hide_index=True, num_rows="dynamic", 
     column_config={
-        "Year": st.column_config.NumberColumn("Year", format="%.0f"), # Removed strict %d to prevent NaN dropping
+        "Year": st.column_config.NumberColumn("Year", format="%.0f"),
         "DOY": st.column_config.NumberColumn("DOY"),
         "Latitude": st.column_config.NumberColumn("Lat", format="%.4f"),
         "Longitude": st.column_config.NumberColumn("Lon", format="%.4f"),
