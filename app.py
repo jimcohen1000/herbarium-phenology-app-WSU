@@ -22,7 +22,6 @@ if not os.path.exists(db_file):
     pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
 
 # --- Helpers: API Fetchers & Formatting ---
-# --- Helpers: API Fetchers & Formatting ---
 def get_elevation(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
@@ -52,7 +51,7 @@ def get_climate_data(lat, lon, el, prd):
             return data[0] if isinstance(data, list) else data
         else:
             st.error(f"⚠️ ClimateNA API Error ({res.status_code}): Could not fetch {prd}.")
-            st.code(res.text)  # Shows the exact error from the server
+            st.code(res.text)  
             return {}
     except Exception as e: 
         st.error(f"⚠️ ClimateNA Network/Timeout Error: {e}")
@@ -93,33 +92,38 @@ with c1:
             lon = st.number_input("Lon", format="%.5f", value=-115.5682)
             el = st.number_input("Elev (m)", value=1420)
             
-            submitted = st.form_submit_button("💾 SAVE ENTRY", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("💾 SAVE ENTRY", type="primary", width="stretch")
         
         if submitted:
             with st.spinner("Fetching climate models..."):
                 year_data = get_climate_data(lat, lon, el, f"Year_{date_val.year}")
                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                 
-                row = {
-                    "Data_Source": "Manual Entry",
-                    "Collector": collector, "Col_Number": col_num, "Barcode": barcode,
-                    "Species": spp, "DOY": int(date_val.strftime("%j")), "Year": date_val.year,
-                    "Flowering": flow, "Fruiting": fruit, "Vegetative": veg,
-                    "Latitude": lat, "Longitude": lon, "Elevation": el, "URL": ""
-                }
-                
-                for k, v in year_data.items(): row[f"Y_{k}"] = v
-                for k, v in norm_data.items(): row[f"N_{k}"] = v
-                
-                try:
-                    df_existing = pd.read_csv(db_file)
-                except Exception:
-                    df_existing = pd.DataFrame(columns=base_headers)
+                # Protection: Halt if API rejected the call so we don't save empty rows
+                if not year_data and not norm_data:
+                    st.warning("Data fetch failed (likely API Rate Limit). Entry was NOT saved to protect the database. Please try again later.")
+                else:
+                    row = {
+                        "Data_Source": "Manual Entry",
+                        "Collector": collector, "Col_Number": col_num, "Barcode": barcode,
+                        "Species": spp, "DOY": int(date_val.strftime("%j")), "Year": date_val.year,
+                        "Flowering": flow, "Fruiting": fruit, "Vegetative": veg,
+                        "Latitude": lat, "Longitude": lon, "Elevation": el, "URL": ""
+                    }
                     
-                df_combined = pd.concat([df_existing, pd.DataFrame([row])], ignore_index=True)
-                save_with_ordered_columns(df_combined, db_file)
-                st.success("Entry saved!")
-                # st.rerun()
+                    for k, v in year_data.items(): row[f"Y_{k}"] = v
+                    for k, v in norm_data.items(): row[f"N_{k}"] = v
+                    
+                    try:
+                        df_existing = pd.read_csv(db_file)
+                    except Exception:
+                        df_existing = pd.DataFrame(columns=base_headers)
+                        
+                    df_combined = pd.concat([df_existing, pd.DataFrame([row])], ignore_index=True)
+                    save_with_ordered_columns(df_combined, db_file)
+                    st.success("Entry saved!")
+                    time.sleep(1)
+                    st.rerun()
 
     # --- TAB 2: INATURALIST BATCH IMPORT ---
     with tab2:
@@ -133,7 +137,7 @@ with c1:
             inat_limit = st.slider("Records to Fetch", 5, 50, 25, step=5)
             st.info("Randomly samples North American records -> Dedups -> Calculates Elev -> Fetches ClimateNA.")
             
-            inat_submitted = st.form_submit_button("📥 FETCH iNATURALIST", type="primary", use_container_width=True)
+            inat_submitted = st.form_submit_button("📥 FETCH iNATURALIST", type="primary", width="stretch")
             
         if inat_submitted:
             try:
@@ -144,7 +148,7 @@ with c1:
 
             records = []
             available_years = list(range(d1.year, d2.year + 1))
-            random_years = random.choices(available_years, k=inat_limit * 4) # extra buffer for skipped dupes
+            random_years = random.choices(available_years, k=inat_limit * 4) 
             
             st.write(f"Contacting iNaturalist for {inat_limit} randomized North American records...")
             progress_bar = st.progress(0)
@@ -154,7 +158,6 @@ with c1:
             for y in random_years:
                 if len(collected_data) >= inat_limit: break
                 
-                # Bounding box added: nelat=83&nelng=-50&swlat=15&swlng=-170 (North America)
                 url = f"https://api.inaturalist.org/v1/observations?taxon_name={inat_spp}&quality_grade=research&d1={y}-01-01&d2={y}-12-31&nelat=83&nelng=-50&swlat=15&swlng=-170&per_page=5"
                 try:
                     res = requests.get(url, timeout=5)
@@ -163,18 +166,17 @@ with c1:
                         for obs in data:
                             if len(collected_data) >= inat_limit: break
                             obs_url = obs.get('uri', "")
-                            
-                            # Deduplication Check
                             if obs_url in existing_urls or obs.get('id') in [d.get('id') for d in collected_data]:
                                 continue
-                                
                             collected_data.append(obs)
                             status_text.text(f"Found new record from {y}... ({len(collected_data)}/{inat_limit})")
                 except Exception:
                     pass
             
             if collected_data:
+                api_limit_hit = False
                 for i, obs in enumerate(collected_data):
+                    if api_limit_hit: break
                     if obs.get('location') and obs.get('observed_on'):
                         lat_str, lon_str = obs['location'].split(',')
                         try:
@@ -197,6 +199,12 @@ with c1:
                                 status_text.text(f"Processing {i+1}/{len(collected_data)}: Pulling climate models...")
                                 year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
                                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                                
+                                if not year_data and not norm_data:
+                                    st.warning("ClimateNA API limit reached during batch fetch. Stopping early.")
+                                    api_limit_hit = True
+                                    break
+                                
                                 for k, v in year_data.items(): row[f"Y_{k}"] = v
                                 for k, v in norm_data.items(): row[f"N_{k}"] = v
                             
@@ -212,9 +220,10 @@ with c1:
                         df_existing = pd.DataFrame(columns=base_headers)
                     df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
                     save_with_ordered_columns(df_combined, db_file)
-                    st.success(f"Added {len(records)} temporally randomized iNaturalist records!")
-                    time.sleep(1)
-                    st.rerun()
+                    st.success(f"Added {len(records)} records!")
+                    if not api_limit_hit:
+                        time.sleep(1)
+                        st.rerun()
             else:
                 st.warning("Could not find enough valid records.")
 
@@ -231,7 +240,7 @@ with c1:
             gbif_limit = st.slider("Records to Fetch", 5, 50, 25, step=5, key="g_lim")
             st.info("Randomly samples North American records -> Dedups -> Pulls Data -> Fetches ClimateNA.")
             
-            gbif_submitted = st.form_submit_button("📥 FETCH HERBARIA DATA", type="primary", use_container_width=True)
+            gbif_submitted = st.form_submit_button("📥 FETCH HERBARIA DATA", type="primary", width="stretch")
             
         if gbif_submitted:
             try:
@@ -254,7 +263,6 @@ with c1:
             for y in random_years:
                 if len(collected_data) >= gbif_limit: break
                 
-                # Bounding box added: decimalLatitude=15,83 & decimalLongitude=-170,-50
                 url = f"https://api.gbif.org/v1/occurrence/search?scientificName={gbif_spp}&hasCoordinate=true&mediaType=StillImage&basisOfRecord=PRESERVED_SPECIMEN&year={y}&decimalLatitude=15,83&decimalLongitude=-170,-50&limit=5"
                 try:
                     res = requests.get(url, timeout=5)
@@ -268,7 +276,6 @@ with c1:
                                 rec_url = obs.get('media')[0].get('identifier', '')
                             cat_num = obs.get('catalogNumber', '')
                             
-                            # Deduplication Check
                             if rec_url in existing_urls or (cat_num and cat_num in existing_barcodes) or obs.get('key') in [d.get('key') for d in collected_data]:
                                 continue
                                 
@@ -278,7 +285,9 @@ with c1:
                     pass
             
             if collected_data:
+                api_limit_hit = False
                 for i, obs in enumerate(collected_data):
+                    if api_limit_hit: break
                     y, m, d = obs.get('year'), obs.get('month'), obs.get('day')
                     lat, lon = obs.get('decimalLatitude'), obs.get('decimalLongitude')
                     
@@ -310,6 +319,12 @@ with c1:
                                 status_text.text(f"Processing {i+1}/{len(collected_data)}: Pulling climate models...")
                                 year_data = get_climate_data(lat, lon, el, f"Year_{dt.year}")
                                 norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+                                
+                                if not year_data and not norm_data:
+                                    st.warning("ClimateNA API limit reached during batch fetch. Stopping early.")
+                                    api_limit_hit = True
+                                    break
+                                
                                 for k, v in year_data.items(): row[f"Y_{k}"] = v
                                 for k, v in norm_data.items(): row[f"N_{k}"] = v
                             
@@ -325,9 +340,10 @@ with c1:
                         df_existing = pd.DataFrame(columns=base_headers)
                     df_combined = pd.concat([df_existing, pd.DataFrame(records)], ignore_index=True)
                     save_with_ordered_columns(df_combined, db_file)
-                    st.success(f"Successfully added {len(records)} temporally randomized herbarium records!")
-                    time.sleep(1.5)
-                    st.rerun()
+                    st.success(f"Successfully added {len(records)} records!")
+                    if not api_limit_hit:
+                        time.sleep(1.5)
+                        st.rerun()
             else:
                 st.warning("Could not find enough valid records.")
 
@@ -380,7 +396,7 @@ with c2:
                         trendline="ols", 
                         title=f"Phenology (DOY) vs {x_var}"
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
                 else:
                     st.warning("Not enough valid data points to graph after applying filters.")
     else:
@@ -392,14 +408,16 @@ with c2:
     st.subheader("📋 Formatted Database Ledger")
     if not df.empty:
         df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
+        
+    # Prevents Streamlit warning about index values when dynamically rendering rows
+    df = df.reset_index(drop=True)
             
-    # Session state key protects data from wiping, dynamically sizing based on columns
     dynamic_key = f"herbarium_ledger_{len(df.columns)}"
     
     edited_df = st.data_editor(
         df, 
         key=dynamic_key,
-        use_container_width=True, hide_index=True, num_rows="dynamic", 
+        width="stretch", hide_index=True, num_rows="dynamic", 
         column_config={
             "Year": st.column_config.NumberColumn("Year", format="%d"),
             "DOY": st.column_config.NumberColumn("DOY"),
@@ -417,19 +435,18 @@ with c2:
     
     col_save, col_dl, _ = st.columns([1, 1, 2])
     with col_save:
-        if st.button("💾 Save Ledger Edits", type="primary", use_container_width=True):
+        if st.button("💾 Save Ledger Edits", type="primary", width="stretch"):
             save_with_ordered_columns(edited_df, db_file)
             st.success("Database updated successfully!")
             st.rerun()
 
     with col_dl:
-        # Pull straight from the active dataframe 'df' loaded at the top of column 2
         st.download_button(
             label="📥 Download Full CSV", 
             data=df.to_csv(index=False).encode('utf-8'), 
             file_name="herbarium_full_data.csv", 
             mime="text/csv",
-            use_container_width=True
+            width="stretch"
         )
         
     with st.expander("⚠️ Danger Zone"):
