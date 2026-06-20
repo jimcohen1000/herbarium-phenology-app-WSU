@@ -77,12 +77,14 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year)
     
     records = []
-    progress_bar = st.sidebar.progress(0)
+    progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
     
     limit_reached_flag = False 
     
-    for i, row in cleaned_df.iterrows():
+    # We use enumerate() here to get a clean 0, 1, 2 counter (count) 
+    # instead of relying on the dataframe's index (idx)
+    for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         row_dict = row.to_dict()
         
         lat = safe_float(row_dict.get('Latitude'))
@@ -96,7 +98,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
         if lat is not None and lon is not None:
             # 1. Fetch Elevation
             if el is None or el == 0.0 or pd.isna(el):
-                status_text.text(f"Fetching elevation... ({i+1}/{len(cleaned_df)})")
+                status_text.text(f"Fetching elevation... ({count+1}/{len(cleaned_df)})")
                 fetched_el = get_elevation(lat, lon)
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
@@ -107,7 +109,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if year is not None:
                 if not limit_reached_flag:
                     climate_year = min(year, 2022) # ClimateNA currently maxes at 2022
-                    status_text.text(f"Fetching ClimateNA for {climate_year}... ({i+1}/{len(cleaned_df)})")
+                    status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                     year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
                     
                     if year_data.get("_LIMIT_REACHED"):
@@ -122,7 +124,10 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                             for k, v in norm_data.items(): row_dict[f"N_{k}"] = v
                 
         records.append(row_dict)
-        progress_bar.progress((i + 1) / len(cleaned_df))
+        
+        # Safely calculate progress and ensure it never mathematically exceeds 1.0
+        progress_val = min((count + 1) / len(cleaned_df), 1.0)
+        progress_bar.progress(progress_val)
         
     status_text.text("Finished processing pipeline!")
     
