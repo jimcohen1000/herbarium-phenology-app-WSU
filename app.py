@@ -5,6 +5,7 @@ import plotly.express as px
 from datetime import datetime
 import urllib.parse
 import time
+import statsmodels
 import os
 
 # ==========================================
