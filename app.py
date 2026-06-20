@@ -13,9 +13,6 @@ import numpy as np
 # ==========================================
 st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
-if "climate_limit_hit" not in st.session_state:
-    st.session_state.climate_limit_hit = False
-
 db_file = "specimen_ledger.csv"
 base_headers = [
     "Data_Source", "Collector", "Col_Number", "Barcode", "Species",
@@ -38,42 +35,40 @@ def safe_int(val):
     try: return int(float(val)) if pd.notna(val) and val != '' else None
     except: return None
 
+# --- Helpers: API Fetchers & Formatting ---
 def get_elevation(lat, lon):
     try:
-        url = f"https://api.opentopodata.org/v1/aster30m?locations={lat},{lon}"
+        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
-            results = res.json().get('results')
-            if results and len(results) > 0:
-                return results[0].get('elevation')
-    except: pass
+            elevations = res.json().get('elevation')
+            if elevations and len(elevations) > 0:
+                return float(elevations[0])
+    except Exception: 
+        return None
     return None
 
-def get_climate_data(lat, lon, el, period):
-    url = "https://climatena.ca/api/data/AnyPoint"
-    params = {
-        "lat": lat, "lon": lon, "el": el, 
-        "period": period 
-    }
+def get_climate_data(lat, lon, el, prd):
+    if el is None: return {} 
+    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
-        res = requests.get(url, params=params, timeout=10)
-        
-        if res.status_code in [429, 403]: 
-            return {"_LIMIT_REACHED": True}
-            
+        res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            if isinstance(data, dict) and "limit" in str(data.get("error", "")).lower():
-                return {"_LIMIT_REACHED": True}
-                
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]
-            elif isinstance(data, dict):
-                return data
-    except Exception as e:
-        print(f"Climate API Error: {e}")
+            return data[0] if isinstance(data, list) else data
+    except Exception: 
+        return {}
     return {}
 
+def save_with_ordered_columns(df_to_save, filepath):
+    new_order = [c for c in base_headers if c in df_to_save.columns]
+    priority_climate = ["Y_MAT", "N_MAT", "Y_MAP", "N_MAP"] 
+    new_order += [c for c in priority_climate if c in df_to_save.columns and c not in new_order]
+    new_order += [c for c in df_to_save.columns if c not in new_order]
+    df_to_save[new_order].to_csv(filepath, index=False)
+
+# --- Data Thinning & Enrichment ---
 def thin_and_cap_data(df, target_limit, max_per_year):
     valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'URL']).copy()
     valid_df = valid_df[valid_df['URL'].str.strip() != '']
@@ -112,8 +107,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
     
-    limit_reached_flag = st.session_state.climate_limit_hit 
-    
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         row_dict = row.to_dict()
         
@@ -133,7 +126,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             else:
                 row_dict['Elevation'] = el
             
-            if year is not None and not limit_reached_flag:
+            if year is not None:
                 climate_year = min(year, 2022) 
                 status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                 
@@ -141,17 +134,14 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 if not year_data: 
                     year_data = get_climate_data(lat, lon, el, str(climate_year))
                 
-                if year_data.get("_LIMIT_REACHED"):
-                    st.session_state.climate_limit_hit = True
-                    limit_reached_flag = True
-                elif year_data: 
+                if year_data: 
                     norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
                     for k, v in year_data.items(): 
-                        if k not in ["ID1", "ID2", "lat", "lon", "elev", "prd", "varYSM", "period"]:
+                        if k not in ["ID1", "ID2", "lat", "lon", "el", "prd", "varYSM", "period"]:
                             row_dict[f"Y_{k}"] = v
                     if isinstance(norm_data, dict):
                         for k, v in norm_data.items(): 
-                            if k not in ["ID1", "ID2", "lat", "lon", "elev", "prd", "varYSM", "period"]:
+                            if k not in ["ID1", "ID2", "lat", "lon", "el", "prd", "varYSM", "period"]:
                                 row_dict[f"N_{k}"] = v
                 
         records.append(row_dict)
@@ -170,10 +160,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             
         combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
         
-        new_order = [c for c in base_headers if c in combined_df.columns]
-        new_order += [c for c in combined_df.columns if c not in new_order]
-        
-        combined_df[new_order].to_csv(db_file, index=False)
+        save_with_ordered_columns(combined_df, db_file)
         st.sidebar.success(f"Added {len(final_new_df)} processed records!")
         time.sleep(2)
         st.rerun()
@@ -182,12 +169,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
 #        SIDEBAR: DATA ENTRY
 # ==========================================
 st.sidebar.header("Data Entry & Ingestion")
-
-if st.session_state.climate_limit_hit:
-    st.sidebar.error("⚠️ **ClimateNA Limit Reached!**\n\nWait 1 hour before querying more.")
-    if st.sidebar.button("Dismiss Warning", type="primary"):
-        st.session_state.climate_limit_hit = False
-        st.rerun()
 
 with st.sidebar.expander("✏️ Manual Entry", expanded=False):
     with st.form("manual_entry_form"):
@@ -341,7 +322,7 @@ edited_df = st.data_editor(
 col_btn1, col_btn2 = st.columns([1, 4])
 with col_btn1:
     if st.button("💾 Save Manual Edits", type="primary"):
-        edited_df.to_csv(db_file, index=False)
+        save_with_ordered_columns(edited_df, db_file)
         st.success("Master database updated successfully!")
 with col_btn2:
     st.download_button(
