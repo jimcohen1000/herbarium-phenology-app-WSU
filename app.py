@@ -214,41 +214,59 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="g_max_yr")
     
     if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
-        with st.spinner("Querying GBIF..."):
+        with st.spinner("Paginating GBIF... (This may take a moment to find enough valid records)"):
             spp_encoded = urllib.parse.quote(gbif_spp)
-            url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit={min(g_limit * 6, 300)}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
             raw_records = []
             seen_col_nums = set()
-            try:
-                res = requests.get(url, timeout=10)
-                if res.status_code == 200:
-                    for obs in res.json().get('results', []):
-                        rec_url = obs.get('references', '')
-                        if not rec_url and obs.get('media'): 
-                            rec_url = obs.get('media')[0].get('identifier', '')
-                        if not rec_url: continue
-                        col_num = obs.get('recordNumber', '')
-                        if col_num:
-                            if col_num in seen_col_nums: continue
-                            seen_col_nums.add(col_num)
+            offset = 0
+            end_of_records = False
+            
+            # Keep asking GBIF for pages until we have ~15x the limit, ensuring enough survive the filters
+            while len(raw_records) < (g_limit * 15) and not end_of_records and offset < 5000:
+                url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&limit=300&offset={offset}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
+                try:
+                    res = requests.get(url, timeout=10)
+                    if res.status_code == 200:
+                        data = res.json()
+                        results = data.get('results', [])
+                        if not results: break
                         
-                        y, m, d, doy = obs.get('year'), obs.get('month'), obs.get('day'), pd.NA
-                        if not y and obs.get('eventDate'):
-                            try: y = int(obs['eventDate'][:4])
-                            except: pass
-                        if y and m and d:
-                            try: doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
-                            except: pass
+                        for obs in results:
+                            rec_url = obs.get('references', '')
+                            if not rec_url and obs.get('media'): 
+                                rec_url = obs.get('media')[0].get('identifier', '')
+                            if not rec_url: continue
+                            
+                            col_num = obs.get('recordNumber', '')
+                            if col_num:
+                                if col_num in seen_col_nums: continue
+                                seen_col_nums.add(col_num)
+                            
+                            y, m, d, doy = obs.get('year'), obs.get('month'), obs.get('day'), pd.NA
+                            if not y and obs.get('eventDate'):
+                                try: y = int(obs['eventDate'][:4])
+                                except: pass
+                            if y and m and d:
+                                try: doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
+                                except: pass
+                            
+                            raw_records.append({
+                                "Data_Source": "GBIF Herbarium", "Collector": obs.get('recordedBy', ''),
+                                "Col_Number": col_num, "Barcode": obs.get('catalogNumber', ''),
+                                "Species": obs.get('species', gbif_spp), "Year": safe_int(y) if y else pd.NA,
+                                "DOY": doy, "Latitude": obs.get('decimalLatitude'),
+                                "Longitude": obs.get('decimalLongitude'), "Elevation": obs.get('elevation', pd.NA),
+                                "URL": rec_url, "Flowering": False, "Fruiting": False, "Vegetative": False
+                            })
                         
-                        raw_records.append({
-                            "Data_Source": "GBIF Herbarium", "Collector": obs.get('recordedBy', ''),
-                            "Col_Number": col_num, "Barcode": obs.get('catalogNumber', ''),
-                            "Species": obs.get('species', gbif_spp), "Year": safe_int(y) if y else pd.NA,
-                            "DOY": doy, "Latitude": obs.get('decimalLatitude'),
-                            "Longitude": obs.get('decimalLongitude'), "Elevation": obs.get('elevation', pd.NA),
-                            "URL": rec_url, "Flowering": False, "Fruiting": False, "Vegetative": False
-                        })
-            except Exception as e: st.sidebar.error(f"GBIF Error: {e}")
+                        end_of_records = data.get('endOfRecords', True)
+                        offset += 300
+                    else:
+                        break
+                except Exception as e: 
+                    st.sidebar.error(f"GBIF Error: {e}")
+                    break
+                    
             pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=g_limit, max_per_year=g_max_yr)
 
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
@@ -261,33 +279,50 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="i_max_yr")
         
     if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
-        with st.spinner(f"Downloading observations..."):
+        with st.spinner(f"Paginating iNaturalist... (This may take a moment to find enough valid records)"):
             spp_encoded = urllib.parse.quote(inat_spp)
-            url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page={min(i_limit * 5, 200)}&quality_grade=research"
             raw_records = []
-            try:
-                res = requests.get(url, timeout=10)
-                if res.status_code == 200:
-                    for obs in res.json().get('results', []):
-                        rec_url = obs.get('uri', '')
-                        if not rec_url: continue
-                        if obs.get('location') and obs.get('observed_on'):
-                            lat_str, lon_str = obs['location'].split(',')
-                            try:
-                                dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
-                                obs_year, obs_doy = dt.year, dt.timetuple().tm_yday
-                            except:
-                                obs_year, obs_doy = pd.NA, pd.NA
-                                
-                            raw_records.append({
-                                "Data_Source": "iNaturalist", "Collector": obs.get('user', {}).get('login', ''),
-                                "Col_Number": "", "Barcode": str(obs.get('id', '')),
-                                "Species": obs.get('taxon', {}).get('name', inat_spp),
-                                "Year": obs_year, "DOY": obs_doy,
-                                "Latitude": float(lat_str), "Longitude": float(lon_str), "Elevation": pd.NA,
-                                "URL": rec_url, "Flowering": False, "Fruiting": False, "Vegetative": False
-                            })
-            except Exception as e: st.sidebar.error(f"iNaturalist Error: {e}")
+            page = 1
+            
+            # Keep asking iNaturalist for pages until we have enough records
+            while len(raw_records) < (i_limit * 15) and page <= 10:
+                url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
+                try:
+                    res = requests.get(url, timeout=10)
+                    if res.status_code == 200:
+                        data = res.json()
+                        results = data.get('results', [])
+                        if not results: break
+                        
+                        for obs in results:
+                            rec_url = obs.get('uri', '')
+                            if not rec_url: continue
+                            if obs.get('location') and obs.get('observed_on'):
+                                lat_str, lon_str = obs['location'].split(',')
+                                try:
+                                    dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
+                                    obs_year, obs_doy = dt.year, dt.timetuple().tm_yday
+                                except:
+                                    obs_year, obs_doy = pd.NA, pd.NA
+                                    
+                                raw_records.append({
+                                    "Data_Source": "iNaturalist", "Collector": obs.get('user', {}).get('login', ''),
+                                    "Col_Number": "", "Barcode": str(obs.get('id', '')),
+                                    "Species": obs.get('taxon', {}).get('name', inat_spp),
+                                    "Year": obs_year, "DOY": obs_doy,
+                                    "Latitude": float(lat_str), "Longitude": float(lon_str), "Elevation": pd.NA,
+                                    "URL": rec_url, "Flowering": False, "Fruiting": False, "Vegetative": False
+                                })
+                        
+                        if len(results) < 200: 
+                            break # We have hit the end of available iNaturalist records
+                        page += 1
+                    else:
+                        break
+                except Exception as e: 
+                    st.sidebar.error(f"iNaturalist Error: {e}")
+                    break
+                    
             pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=i_limit, max_per_year=i_max_yr)
 
 st.sidebar.write("---")
