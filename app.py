@@ -383,6 +383,27 @@ with c2:
         df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
             
     # Session state key protects data from wiping during unexpected widget redrawing
+    
+    # Create a dynamic key so the table refreshes its layout when new API columns arrive
+
+    edited_df = st.data_editor(
+        df, 
+    dynamic_key = f"herbarium_ledger_{len(df.columns)}"
+        use_container_width=True, hide_index=True, num_rows="dynamic", 
+        column_config={
+            "Year": st.column_config.NumberColumn("Year", format="%d"),
+            "DOY": st.column_config.NumberColumn("DOY"),
+            "Latitude": st.column_config.NumberColumn("Lat", format="%.4f"),
+            "Longitude": st.column_config.NumberColumn("Lon", format="%.4f"),
+            "Elevation": st.column_config.NumberColumn("Elev", format="%d m"),
+            "URL": st.column_config.LinkColumn("Link"),
+            "Data_Source": st.column_config.TextColumn("Source", disabled=True), 
+            "Flowering": st.column_config.CheckboxColumn("Flowering"),
+            "Fruiting": st.column_config.CheckboxColumn("Fruiting"),
+            "Vegetative": st.column_config.CheckboxColumn("Vegetative"),
+            "Species": st.column_config.TextColumn("Species") 
+        }
+    )
     edited_df = st.data_editor(
         df, 
         key="herbarium_ledger",
