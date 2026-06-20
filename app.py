@@ -321,7 +321,8 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
-            raw_records, page = 1, 1
+            # THE FIX IS RIGHT HERE: changed '1' to '[]'
+            raw_records, page = [], 1
             while len(raw_records) < 3000 and page <= 15:
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
@@ -504,7 +505,6 @@ with tab4:
         
         row = df.loc[target_idx]
         
-        # Swapped Markdown for a native Streamlit link button to ensure it routes properly
         st.link_button("🔗 Click Here to View Original Specimen Image/Page", row['URL'], type="primary", use_container_width=True)
         st.write("---")
         
