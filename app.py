@@ -202,12 +202,23 @@ st.title("🌱 Herbarium Specimen Tracker")
 
 df = pd.read_csv(db_file)
 
+# --- TYPE SAFETY FIX FOR STREAMLIT DATA EDITOR ---
+# Checkbox columns crash if they receive NaN or text. Force them to Booleans:
+for col in ["Flowering", "Fruiting", "Vegetative"]:
+    if col in df.columns:
+        df[col] = df[col].fillna(False).astype(bool)
+
+# Number columns crash if they receive strings. Force them to numeric:
+for col in ["Year", "DOY", "Latitude", "Longitude", "Elevation"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+
 st.subheader("📋 Database Ledger")
 if not df.empty:
     df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
 df = df.reset_index(drop=True)
 
-# The dynamic key has been removed to fix the StreamlitAPIException
 edited_df = st.data_editor(
     df, 
     width="stretch", hide_index=True, num_rows="dynamic", 
@@ -244,9 +255,6 @@ if df.empty:
     st.info("The ledger is currently empty. Ingest specimen data via the sidebar to generate figures.")
 else:
     plot_df = edited_df.copy()
-    plot_df['Year'] = pd.to_numeric(plot_df['Year'], errors='coerce')
-    plot_df['DOY'] = pd.to_numeric(plot_df['DOY'], errors='coerce')
-    plot_df['Latitude'] = pd.to_numeric(plot_df['Latitude'], errors='coerce')
     
     if 'Y_MAT' not in plot_df.columns:
         plot_df['Y_MAT'] = 12.5 + (plot_df['Year'] - 2000) * 0.04
