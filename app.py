@@ -227,11 +227,12 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
     col_yr1, col_yr2 = st.columns(2)
-    with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950)
-    with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026)
+    # Added unique keys to the GBIF number inputs
+    with col_yr1: g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start_yr")
+    with col_yr2: g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end_yr")
     col_lim1, col_lim2 = st.columns(2)
-    with col_lim1: g_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5)
-    with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3)
+    with col_lim1: g_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="g_limit_rec")
+    with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="g_max_yr")
     
     if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
         with st.spinner("Querying GBIF..."):
@@ -274,11 +275,12 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     inat_spp = st.text_input("Species Name (iNat):", key="i_spp")
     col_in1, col_in2 = st.columns(2)
-    with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000)
-    with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026)
+    # Added unique keys to the iNaturalist number inputs
+    with col_in1: i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start_yr")
+    with col_in2: i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end_yr")
     col_ilim1, col_ilim2 = st.columns(2)
-    with col_ilim1: i_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5)
-    with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3)
+    with col_ilim1: i_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="i_limit_rec")
+    with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="i_max_yr")
         
     if st.button("Fetch & Process iNaturalist", type="primary", use_container_width=True):
         with st.spinner(f"Downloading observations..."):
@@ -376,7 +378,7 @@ else:
     
     st.markdown("### Graphing Options")
     
-    # New Species Filter
+    # Species Filter
     selected_species = st.multiselect(
         "Filter by Species:",
         options=available_species,
@@ -418,7 +420,6 @@ else:
             title=f"{selected_y} vs. {selected_x}"
         )
         
-        # Native Numpy Calculation (No statsmodels needed)
         x_vals = plot_df[selected_x].values
         y_vals = plot_df[selected_y].values
         
