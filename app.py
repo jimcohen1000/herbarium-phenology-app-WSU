@@ -434,18 +434,21 @@ with c2:
     )
     
     col_save, col_dl, _ = st.columns([1, 1, 2])
+    
+    with col_save:
+        if st.button("💾 Save Ledger Edits", type="primary", width="stretch"):
+            save_with_ordered_columns(edited_df, db_file)
+            st.success("Database updated successfully!")
+            time.sleep(1)
+            st.rerun()
+
     with col_dl:
-        # 1. Create a unique filename using the current date and exact time
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         dynamic_filename = f"herbarium_export_{current_time}.csv"
         
-        # 2. Package the live edited dataframe
-        csv_data = edited_df.to_csv(index=False).encode('utf-8')
-        
-        # 3. Create the button with the dynamic name
         st.download_button(
             label="📥 Download Full CSV", 
-            data=csv_data, 
+            data=edited_df.to_csv(index=False).encode('utf-8'), 
             file_name=dynamic_filename, 
             mime="text/csv",
             width="stretch"
