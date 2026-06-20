@@ -22,6 +22,7 @@ if not os.path.exists(db_file):
     pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
 
 # --- Helpers: API Fetchers & Formatting ---
+# --- Helpers: API Fetchers & Formatting ---
 def get_elevation(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
@@ -30,22 +31,32 @@ def get_elevation(lat, lon):
             elevations = res.json().get('elevation')
             if elevations and len(elevations) > 0:
                 return float(elevations[0])
-    except Exception: 
-        return None
+        else:
+            st.error(f"⚠️ Elevation API failed with status: {res.status_code}")
+    except Exception as e: 
+        st.error(f"⚠️ Elevation Network Error: {e}")
     return None
 
 def get_climate_data(lat, lon, el, prd):
-    if el is None: return {} 
+    if el is None: 
+        st.warning(f"⚠️ Skipping ClimateNA for {prd}: Elevation is missing.")
+        return {} 
+        
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    
     try:
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             return data[0] if isinstance(data, list) else data
-    except Exception: 
+        else:
+            st.error(f"⚠️ ClimateNA API Error ({res.status_code}): Could not fetch {prd}.")
+            st.code(res.text)  # Shows the exact error from the server
+            return {}
+    except Exception as e: 
+        st.error(f"⚠️ ClimateNA Network/Timeout Error: {e}")
         return {}
-    return {}
 
 def save_with_ordered_columns(df_to_save, filepath):
     new_order = [c for c in base_headers if c in df_to_save.columns]
