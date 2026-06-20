@@ -152,6 +152,43 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
 # ==========================================
 st.sidebar.header("Data Entry & Ingestion")
 
+with st.sidebar.expander("✏️ Manual Entry", expanded=False):
+    with st.form("manual_entry_form"):
+        st.markdown("**Add a New Specimen Record**")
+        m_spp = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale")
+        m_col = st.text_input("Collector:")
+        
+        c1, c2 = st.columns(2)
+        with c1: m_yr = st.number_input("Year:", min_value=1800, max_value=2026, value=datetime.now().year)
+        with c2: m_doy = st.number_input("DOY:", min_value=1, max_value=366, value=1)
+        
+        c3, c4 = st.columns(2)
+        with c3: m_lat = st.number_input("Latitude:", format="%.5f", value=0.0)
+        with c4: m_lon = st.number_input("Longitude:", format="%.5f", value=0.0)
+        
+        submit_manual = st.form_submit_button("Add & Process Record", use_container_width=True)
+        
+        if submit_manual:
+            if not m_spp or m_lat == 0.0 or m_lon == 0.0:
+                st.error("Species, Latitude, and Longitude are required!")
+            else:
+                new_record = [{
+                    "Data_Source": "Manual Entry",
+                    "Collector": m_col,
+                    "Col_Number": "",
+                    "Barcode": "",
+                    "Species": m_spp,
+                    "Year": m_yr,
+                    "DOY": m_doy,
+                    "Latitude": m_lat,
+                    "Longitude": m_lon,
+                    "Elevation": pd.NA,
+                    "URL": "",
+                    "Flowering": False, "Fruiting": False, "Vegetative": False
+                }]
+                # Push through the pipeline to auto-fetch elevation and climate!
+                pipeline_enrich_and_save(pd.DataFrame(new_record), target_limit=1, max_per_year=1)
+
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", placeholder="e.g., Lithospermum ruderale", key="g_spp")
     col_yr1, col_yr2 = st.columns(2)
@@ -261,7 +298,7 @@ if st.sidebar.button("🗑️ Clear Entire Database"):
 #          MAIN UI: DATAFRAME
 # ==========================================
 st.title("🌱 Phenology & Climate Dataset Builder")
-st.markdown("Use the sidebar to fetch data via API. The pipeline will automatically gather coordinates, pull elevation, and fetch **yearly & normal climate variables** via ClimateNA before adding them to your ledger.")
+st.markdown("Use the sidebar to fetch data via API or enter data manually. The pipeline will automatically gather coordinates, pull elevation, and fetch **yearly & normal climate variables** via ClimateNA before adding them to your ledger.")
 
 df = pd.read_csv(db_file)
 
