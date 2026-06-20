@@ -398,14 +398,20 @@ if df.empty:
     st.info("The ledger is currently empty. Ingest specimen data via the sidebar to generate figures.")
 else:
     plot_df = edited_df.copy()
-    plot_df['Year'] = pd.to_numeric(plot_df['Year'], errors='coerce')
-    plot_df['DOY'] = pd.to_numeric(plot_df['DOY'], errors='coerce')
-    plot_df['Latitude'] = pd.to_numeric(plot_df['Latitude'], errors='coerce')
     
+    # Ensure standard base columns are explicitly numeric
+    for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
+        if col in plot_df.columns:
+            plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
+            
+    # Ensure ALL dynamically added ClimateNA columns (Y_ and N_) are numeric for graphing
+    climate_cols = [c for c in plot_df.columns if c.startswith('Y_') or c.startswith('N_')]
+    for col in climate_cols:
+        plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
+
     if 'Y_MAT' not in plot_df.columns:
         has_climate_data = False
     else:
-        plot_df['Y_MAT'] = pd.to_numeric(plot_df['Y_MAT'], errors='coerce')
         has_climate_data = True
 
     plot_df = plot_df.dropna(subset=['Year', 'DOY'])
@@ -428,11 +434,33 @@ else:
                 st.warning("No ClimateNA data found yet. Fetch records to generate this graph.")
 
         with fig_col2:
-            st.markdown("**Phenological Profile: Collection Day of Year vs. Latitude**")
+            st.markdown("**Phenological Profile: Dynamic Scatter Plot**")
+            
+            # Dynamically grab all numeric columns for the dropdown
+            numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
+            
+            # Remove DOY from the options so we aren't graphing DOY vs DOY
+            if 'DOY' in numeric_cols:
+                numeric_cols.remove('DOY')
+                
+            # Set a sensible default starting variable (Latitude if it exists)
+            default_ix = numeric_cols.index('Latitude') if 'Latitude' in numeric_cols else 0
+            
+            # The dropdown selector
+            selected_x_var = st.selectbox(
+                "Select X-Axis Variable:", 
+                options=numeric_cols, 
+                index=default_ix
+            )
+            
+            # Generate the scatter plot using the selected variable
             fig_pheno = px.scatter(
-                plot_df, x='Latitude', y='DOY', color='Species' if 'Species' in plot_df.columns else None,
+                plot_df, 
+                x=selected_x_var, 
+                y='DOY', 
+                color='Species' if 'Species' in plot_df.columns else None,
                 hover_data=['Collector', 'Year'],
-                labels={'DOY': 'Day of Year (DOY)', 'Latitude': 'Latitude (°N)'},
+                labels={'DOY': 'Day of Year (DOY)', selected_x_var: selected_x_var},
                 template="streamlit"
             )
             fig_pheno.update_layout(margin=dict(l=20, r=20, t=10, b=20))
