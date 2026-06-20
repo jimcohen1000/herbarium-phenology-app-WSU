@@ -27,13 +27,12 @@ if not os.path.exists(db_file):
 def remove_duplicate_collections(df):
     """
     Safely drops duplicate sheets from the same collection event.
-    Avoids the 'NaN trap' so missing collector numbers don't wipe out iNaturalist data.
+    Avoids the 'NaN trap' so missing collector numbers don't wipe out data.
     """
     if df.empty:
         return df
     
     df = df.copy()
-    # Normalize empty or string-represented missing values to true pandas NA
     if 'Col_Number' in df.columns:
         df['Col_Number'] = df['Col_Number'].astype(str).replace(['nan', 'None', '<NA>', ''], pd.NA)
         
@@ -75,42 +74,99 @@ def thin_data_by_year(df, max_per_year=3):
     return pd.concat([thinned_has_year, no_year], ignore_index=True)
 
 
-def save_with_ordered_columns(df, filepath):
-    """Saves the database preserving columns layout."""
-    df.to_csv(filepath, index=False)
+def pipeline_clean_and_save(new_raw_df):
+    """Processes incoming raw data from any source and appends it to the master ledger."""
+    if new_raw_df.empty:
+        st.warning("No data found to import.")
+        return
 
-
-# ==========================================
-#      DATA INGESTION PIPELINE (EXAMPLE)
-# ==========================================
-# This represents wherever you upload, scrape, or fetch new incoming data rows.
-
-def process_new_incoming_data(new_raw_df):
-    """Applies Option A cleaning BEFORE appending data or running climate steps."""
-    st.info("Applying Option A data filters...")
-    
-    # 1. Strip identical collection events
+    # 1. Apply your clean filters
     cleaned_df = remove_duplicate_collections(new_raw_df)
-    
-    # 2. Flatten out temporal density clusters (Capped at 3 per year)
     cleaned_df = thin_data_by_year(cleaned_df, max_per_year=3)
     
-    st.success(f"Filters applied! Reduced row count from {len(new_raw_df)} to {len(cleaned_df)}.")
+    # [OPTIONAL: YOUR CLIMATE API FETCH CODE GOES HERE]
+    # If your old script fetched climate coordinates automatically upon import,
+    # you can run that function right here on `cleaned_df` before combining.
+
+    # 2. Append to master database
+    master_df = pd.read_csv(db_file)
+    combined_df = pd.concat([master_df, cleaned_df], ignore_index=True)
     
-    # [YOUR CLIMATE API FETCH LOGIC GOES HERE]
-    # e.g., climate_df = fetch_climatena_data(cleaned_df)
-    
-    return cleaned_df
+    # Save it back to the file
+    combined_df.to_csv(db_file, index=False)
+    st.success(f"Successfully processed and added {len(cleaned_df)} filtered specimens to the ledger!")
+    time.sleep(1.5)
+    st.rerun()
 
 
 # --- MAIN APP LAYOUT ---
 st.title("🌱 Herbarium Specimen Tracker & Climate Database")
 
-# Load existing working database
+# ==========================================
+#     RESTORED: THREE DATA SOURCES UI
+# ==========================================
+st.subheader("📥 Fetch & Import Specimen Data")
+tab1, tab2, tab3 = st.tabs(["🌐 Source 1: GBIF API", "📸 Source 2: iNaturalist", "📁 Source 3: CSV Upload / Manual"])
+
+with tab1:
+    st.markdown("### Import from GBIF")
+    species_input_1 = st.text_input("Enter Species Name (GBIF):", placeholder="e.g., Quercus alba")
+    limit_1 = st.number_input("Max records to fetch from GBIF:", min_value=10, max_value=1000, value=100, step=10)
+    
+    if st.button("Fetch from GBIF", type="primary"):
+        with st.spinner("Querying GBIF API..."):
+            # --- PASTE YOUR ORIGINAL GBIF FETCHING LOGIC HERE ---
+            # Create a placeholder DataFrame mirroring your original output format:
+            raw_fetched_df = pd.DataFrame(columns=base_headers) 
+            
+            # (Example mock data row so the button runs out of the box)
+            raw_fetched_df = pd.DataFrame([{
+                "Data_Source": "GBIF", "Collector": "Jane Doe", "Col_Number": "104A", 
+                "Species": species_input_1, "Year": 2024, "Latitude": 45.1234, "Longitude": -123.4567
+            }])
+            
+            # Pass results directly through the pipeline
+            pipeline_clean_and_save(raw_fetched_df)
+
+with tab2:
+    st.markdown("### Import from iNaturalist")
+    species_input_2 = st.text_input("Enter Species Name (iNaturalist):", placeholder="e.g., Acer rubrum")
+    
+    if st.button("Fetch from iNaturalist", type="primary"):
+        with st.spinner("Querying iNaturalist API..."):
+            # --- PASTE YOUR ORIGINAL iNATURALIST FETCHING LOGIC HERE ---
+            raw_fetched_df = pd.DataFrame(columns=base_headers)
+            
+            # (Example mock data row missing a collector number to test the 'NaN safety trap')
+            raw_fetched_df = pd.DataFrame([{
+                "Data_Source": "iNaturalist", "Collector": "CitizenSci12", "Col_Number": "", 
+                "Species": species_input_2, "Year": 2025, "Latitude": 42.9876, "Longitude": -122.1111
+            }])
+            
+            pipeline_clean_and_save(raw_fetched_df)
+
+with tab3:
+    st.markdown("### Custom CSV Data Upload")
+    uploaded_file = st.file_uploader("Upload a raw specimen spreadsheet (.csv)", type=["csv"])
+    
+    if uploaded_file is not None:
+        if st.button("Process & Import Uploaded File", type="primary"):
+            try:
+                raw_uploaded_df = pd.read_csv(uploaded_file)
+                pipeline_clean_and_save(raw_uploaded_df)
+            except Exception as e:
+                st.error(f"Error reading uploaded file: {e}")
+
+
+# ==========================================
+#      TABLE & LEDGER DISPLAY SECTION
+# ==========================================
+st.write("---")
+st.subheader("📋 Formatted Database Ledger")
+
+# Load current state of the database
 df = pd.read_csv(db_file)
 
-# --- TABLE SECTION ---
-st.subheader("📋 Formatted Database Ledger")
 if not df.empty:
     df = df.sort_values(by=["Year", "DOY"], ascending=[False, False])
     
@@ -141,7 +197,7 @@ col_save, col_dl_clean, col_dl_full = st.columns([1, 1.2, 1.2])
 
 with col_save:
     if st.button("💾 Save Ledger Edits", type="primary", width="stretch"):
-        save_with_ordered_columns(edited_df, db_file)
+        edited_df.to_csv(db_file, index=False)
         st.success("Database updated successfully!")
         time.sleep(1)
         st.rerun()
