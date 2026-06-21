@@ -1,22 +1,22 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
-import plotly.express as px
+import os
+import time
 from datetime import datetime
 import urllib.parse
-import time
-import os
-import numpy as np
+import plotly.express as px
 
 # ==========================================
-#        APP SETUP & CONFIG
+#        APP SETUP & CANONICAL SCHEMA
 # ==========================================
 st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
-db_file = "specimen_ledger.csv"
+DB_FILE = "phenology_dataset.csv"
 
-# 1. HARDCODED SCHEMA: Guarantees these columns never disappear
-cna_vars = [
+# The exact variables returned by ClimateNA
+CNA_VARS = [
     "MAT","MWMT","MCMT","TD","MAP","MSP","AHM","SHM","DD_0","DD5",
     "DD_18","DD18","NFFD","bFFP","eFFP","FFP","PAS","EMT","EXT","Eref","CMD",
     "MAR","RH","CMI","DD1040","Tmax_wt","Tmax_sp","Tmax_sm","Tmax_at",
@@ -24,26 +24,38 @@ cna_vars = [
     "Tave_at","PPT_wt","PPT_sp","PPT_sm","PPT_at"
 ]
 
-base_headers = [
-    "Data_Source", "Collector", "Col_Number", "Barcode", "Species",
-    "Year", "DOY", "Latitude", "Longitude", "Elevation",
-    "Phenology_Scored", "Flowering", "Fruiting", "Vegetative", "URL",
-    "Y_3Mo_prior_Tmean", "N_3Mo_prior_Tmean", "Tmean_Anomaly",
+CANONICAL_COLUMNS = [
+    "Data_Source", "Collector", "Col_Number", "Barcode", "Species", "Year", "DOY", 
+    "Latitude", "Longitude", "Elevation", "Phenology_Scored", "Flowering", "Fruiting", 
+    "Vegetative", "URL", "Y_3Mo_prior_Tmean", "N_3Mo_prior_Tmean", "Tmean_Anomaly", 
     "Y_3Mo_prior_PPT", "N_3Mo_prior_PPT", "PPT_Anomaly"
-]
-for v in cna_vars: base_headers.append(f"Y_{v}")
-for v in cna_vars: base_headers.append(f"N_{v}")
+] + [f"Y_{v}" for v in CNA_VARS] + [f"N_{v}" for v in CNA_VARS]
 
-if not os.path.exists(db_file):
-    pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
-else:
-    _df = pd.read_csv(db_file)
-    needs_save = False
-    for col in base_headers:
-        if col not in _df.columns:
-            _df[col] = False if col in ["Phenology_Scored", "Flowering", "Fruiting", "Vegetative"] else pd.NA
-            needs_save = True
-    if needs_save: _df.to_csv(db_file, index=False)
+def init_db(filename=DB_FILE):
+    if not os.path.exists(filename):
+        df = pd.DataFrame(columns=CANONICAL_COLUMNS)
+        df.to_csv(filename, index=False)
+    else:
+        # Silently ensure any missing columns are patched in
+        df = pd.read_csv(filename)
+        needs_save = False
+        for col in CANONICAL_COLUMNS:
+            if col not in df.columns:
+                df[col] = False if col in ["Phenology_Scored", "Flowering", "Fruiting", "Vegetative"] else np.nan
+                needs_save = True
+        if needs_save:
+            # Order precisely and save
+            df = df[CANONICAL_COLUMNS]
+            df.to_csv(filename, index=False)
+
+init_db()
+
+def save_with_ordered_columns(df_to_save, filepath=DB_FILE):
+    for col in CANONICAL_COLUMNS:
+        if col not in df_to_save.columns:
+            df_to_save[col] = np.nan
+    df_to_save = df_to_save[CANONICAL_COLUMNS]
+    df_to_save.to_csv(filepath, index=False)
 
 # ==========================================
 #        DATA PIPELINE FUNCTIONS
@@ -62,14 +74,45 @@ def parse_elev(val):
     except: return None
 
 def ensure_url_scheme(url_str):
-    if not url_str or pd.isna(url_str):
-        return ""
+    if not url_str or pd.isna(url_str): return ""
     url_str = str(url_str).strip()
-    if url_str == "Manual":
-        return url_str
-    if not url_str.startswith(('http://', 'https://')):
-        return 'https://' + url_str
+    if url_str == "Manual": return url_str
+    if not url_str.startswith(('http://', 'https://')): return 'https://' + url_str
     return url_str
+
+def get_elevation(lat, lon):
+    try:
+        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            elevations = res.json().get('elevation')
+            if elevations and len(elevations) > 0: return float(elevations[0])
+    except: return None
+    return None
+
+def get_climate_data(lat, lon, el, prd):
+    if pd.isna(el) or el is None:
+        return {"error": "Elevation missing"}
+    
+    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    
+    try:
+        time.sleep(0.7) # Crucial throttle to prevent IP blocking
+        res = requests.get(url, timeout=15)
+        
+        if res.status_code == 200:
+            try:
+                data = res.json()
+                return data[0] if isinstance(data, list) else data
+            except ValueError:
+                return {"error": "API returned invalid data format (likely a rate limit page).", "is_limit": True}
+        elif res.status_code in [403, 429]:
+            return {"error": f"API Limit Reached (HTTP {res.status_code})", "is_limit": True}
+        else:
+            return {"error": f"HTTP {res.status_code}"}
+    except Exception as e:
+        return {"error": f"Connection Failed: {str(e)}"}
 
 def calc_prior_3_months(year, doy):
     try:
@@ -86,47 +129,16 @@ def calc_prior_3_months(year, doy):
         return target_years, target_months
     except: return None, None
 
-def get_elevation(lat, lon):
-    try:
-        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            elevations = res.json().get('elevation')
-            if elevations and len(elevations) > 0: return float(elevations[0])
-    except: return None
-    return None
-
-def get_climate_data(lat, lon, el, prd):
-    if el is None: return {} 
-    base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
-    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
-    try:
-        # 2. THE THROTTLE: Stops the server from blocking your requests
-        time.sleep(0.7) 
-        
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            return data[0] if isinstance(data, list) else data
-        elif res.status_code in [403, 429]:  
-            return {"API_LIMIT_REACHED": True}
-    except: return {}
-    return {}
-
 def get_climate_val(data_dict, prefix, m_str):
-    target1 = f"{prefix}{m_str}".lower()      
-    target2 = f"{prefix}_{m_str}".lower()     
+    if not data_dict or "error" in data_dict: return None
+    t1 = f"{prefix}{m_str}".lower()
+    t2 = f"{prefix}_{m_str}".lower()
     for k, v in data_dict.items():
-        key_lower = str(k).lower()
-        if key_lower == target1 or key_lower == target2:
+        k_lower = str(k).lower()
+        if k_lower == t1 or k_lower == t2:
             try: return float(v)
             except: return None
     return None
-
-def save_with_ordered_columns(df_to_save, filepath):
-    new_order = [c for c in base_headers if c in df_to_save.columns]
-    new_order += [c for c in df_to_save.columns if c not in new_order]
-    df_to_save[new_order].to_csv(filepath, index=False)
 
 def thin_and_cap_data(df, target_limit, max_per_year):
     valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'DOY', 'URL']).copy()
@@ -148,6 +160,10 @@ def thin_and_cap_data(df, target_limit, max_per_year):
         
     return spaced_df.head(target_limit).sample(frac=1).reset_index(drop=True)
 
+# ==========================================
+#        THE CORE ENRICHMENT PIPELINE
+# ==========================================
+
 def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     if raw_df.empty:
         st.sidebar.warning("No records found (or none passed the filters).")
@@ -157,98 +173,123 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year)
     
     if cleaned_df.empty:
-        st.sidebar.warning("No valid records remained after filtering (e.g. missing DOY or images).")
+        st.sidebar.warning("No valid records remained after filtering.")
         return
 
     records = []
     progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
-    climate_api_blocked = False 
+    alert_placeholder = st.sidebar.empty() # Used to show immediate errors
+    
+    halt_processing = False
     
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
-        row_dict = row.to_dict()
+        if halt_processing: 
+            break # Hard stop if API limits are hit
+
+        progress_bar.progress(count / len(cleaned_df))
+        
+        # Initialize a pristine dictionary using our canonical schema
+        row_dict = {col: row.get(col, np.nan) for col in CANONICAL_COLUMNS if not (col.startswith("Y_") or col.startswith("N_") or col.endswith("_Anomaly"))}
         row_dict['Phenology_Scored'] = False
         
         lat, lon = safe_float(row_dict.get('Latitude')), safe_float(row_dict.get('Longitude'))
         year, doy = safe_int(row_dict.get('Year')), safe_int(row_dict.get('DOY'))
         el = safe_float(row_dict.get('Elevation'))
         
-        if lat is not None and lon is not None:
+        if lat is not None and lon is not None and year is not None:
             if el is None or el == 0.0 or pd.isna(el):
                 status_text.text(f"Fetching elevation... ({count+1}/{len(cleaned_df)})")
                 fetched_el = get_elevation(lat, lon)
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
             
-            if year is not None and not climate_api_blocked:
-                climate_year = min(year, 2021) 
-                status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
+            climate_year = min(year, 2021) 
+            status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
+            
+            year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
+            if "error" in year_data:
+                year_data = get_climate_data(lat, lon, el, str(climate_year)) # fallback format
                 
-                year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}") or get_climate_data(lat, lon, el, str(climate_year))
-                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990") or get_climate_data(lat, lon, el, "1961-1990") or get_climate_data(lat, lon, el, "1961_1990")
+            norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
+            if "error" in norm_data:
+                norm_data = get_climate_data(lat, lon, el, "1961_1990")
+            
+            # --- API RATE LIMIT DETECTION ---
+            if ("error" in year_data and year_data.get("is_limit")) or ("error" in norm_data and norm_data.get("is_limit")):
+                halt_processing = True
+                alert_placeholder.error("🚨 **ClimateNA Download Limit Reached!**\n\nThe server temporarily blocked further requests. Saving records processed up to this point and stopping.")
+                break # Break out of the loop completely
                 
-                if (year_data and year_data.get("API_LIMIT_REACHED")) or (norm_data and norm_data.get("API_LIMIT_REACHED")):
-                    climate_api_blocked = True
-                    st.sidebar.error("⚠️ ClimateNA download limit reached! Data will be blank for remaining records.")
-                    year_data, norm_data = {}, {}
+            if "error" not in year_data and "error" not in norm_data:
+                # Map exact canonical columns
+                for k, v in year_data.items(): 
+                    if f"Y_{k}" in CANONICAL_COLUMNS: row_dict[f"Y_{k}"] = v
+                for k, v in norm_data.items(): 
+                    if f"N_{k}" in CANONICAL_COLUMNS: row_dict[f"N_{k}"] = v
                 
-                if year_data and norm_data:
-                    for k, v in year_data.items(): 
-                        if f"Y_{k}" in base_headers: row_dict[f"Y_{k}"] = v
-                    for k, v in norm_data.items(): 
-                        if f"N_{k}" in base_headers: row_dict[f"N_{k}"] = v
-                    
-                    if doy is not None:
-                        ty, tm = calc_prior_3_months(climate_year, doy)
-                        if ty and tm:
-                            prev_year_data = {}
-                            min_y = min(ty)
+                # 3 Month Anomalies Calculation
+                if doy is not None:
+                    ty, tm = calc_prior_3_months(climate_year, doy)
+                    if ty and tm:
+                        min_y = min(ty)
+                        prev_year_data = {}
+                        
+                        if min_y < climate_year: 
+                            prev_year_data = get_climate_data(lat, lon, el, f"Year_{min_y}")
+                            if "error" in prev_year_data and prev_year_data.get("is_limit"):
+                                halt_processing = True
+                                alert_placeholder.error("🚨 **ClimateNA Download Limit Reached!**\n\nThe server blocked requests during a 3-month lookup. Stopping process.")
+                                break
+                        
+                        y_t_vals, n_t_vals, y_p_vals, n_p_vals = [], [], [], []
+                        
+                        for y_t, m_t in zip(ty, tm):
+                            m_str = f"{m_t:02d}"
                             
-                            if min_y < climate_year: 
-                                prev_year_data = get_climate_data(lat, lon, el, f"Year_{min_y}") or get_climate_data(lat, lon, el, str(min_y))
-                                if prev_year_data and prev_year_data.get("API_LIMIT_REACHED"): 
-                                    prev_year_data = {}
+                            n_t = get_climate_val(norm_data, "tave", m_str)
+                            n_p = get_climate_val(norm_data, "ppt", m_str)
+                            if n_t is not None: n_t_vals.append(n_t)
+                            if n_p is not None: n_p_vals.append(n_p)
                             
-                            y_t_vals, n_t_vals = [], []
-                            y_p_vals, n_p_vals = [], []
-                            
-                            for y_t, m_t in zip(ty, tm):
-                                m_str = f"{m_t:02d}"
-                                
-                                n_t = get_climate_val(norm_data, "tave", m_str)
-                                n_p = get_climate_val(norm_data, "ppt", m_str)
-                                if n_t is not None: n_t_vals.append(n_t)
-                                if n_p is not None: n_p_vals.append(n_p)
-                                
-                                target_data = year_data if y_t >= climate_year else prev_year_data
-                                y_t_v = get_climate_val(target_data, "tave", m_str)
-                                y_p_v = get_climate_val(target_data, "ppt", m_str)
-                                if y_t_v is not None: y_t_vals.append(y_t_v)
-                                if y_p_v is not None: y_p_vals.append(y_p_v)
-                            
-                            if len(y_t_vals) == 3 and len(n_t_vals) == 3:
-                                row_dict['Y_3Mo_prior_Tmean'] = round(sum(y_t_vals)/3, 2)
-                                row_dict['N_3Mo_prior_Tmean'] = round(sum(n_t_vals)/3, 2)
-                                row_dict['Tmean_Anomaly'] = round(row_dict['Y_3Mo_prior_Tmean'] - row_dict['N_3Mo_prior_Tmean'], 2)
-                            
-                            if len(y_p_vals) == 3 and len(n_p_vals) == 3:
-                                row_dict['Y_3Mo_prior_PPT'] = round(sum(y_p_vals), 2)
-                                row_dict['N_3Mo_prior_PPT'] = round(sum(n_p_vals), 2)
-                                row_dict['PPT_Anomaly'] = round(row_dict['Y_3Mo_prior_PPT'] - row_dict['N_3Mo_prior_PPT'], 2)
+                            target_data = year_data if y_t >= climate_year else prev_year_data
+                            y_t_v = get_climate_val(target_data, "tave", m_str)
+                            y_p_v = get_climate_val(target_data, "ppt", m_str)
+                            if y_t_v is not None: y_t_vals.append(y_t_v)
+                            if y_p_v is not None: y_p_vals.append(y_p_v)
+                        
+                        if len(y_t_vals) == 3 and len(n_t_vals) == 3:
+                            row_dict['Y_3Mo_prior_Tmean'] = round(sum(y_t_vals)/3, 2)
+                            row_dict['N_3Mo_prior_Tmean'] = round(sum(n_t_vals)/3, 2)
+                            row_dict['Tmean_Anomaly'] = round(row_dict['Y_3Mo_prior_Tmean'] - row_dict['N_3Mo_prior_Tmean'], 2)
+                        
+                        if len(y_p_vals) == 3 and len(n_p_vals) == 3:
+                            row_dict['Y_3Mo_prior_PPT'] = round(sum(y_p_vals), 2)
+                            row_dict['N_3Mo_prior_PPT'] = round(sum(n_p_vals), 2)
+                            row_dict['PPT_Anomaly'] = round(row_dict['Y_3Mo_prior_PPT'] - row_dict['N_3Mo_prior_PPT'], 2)
 
         records.append(row_dict)
-        progress_bar.progress(min((count + 1) / len(cleaned_df), 1.0))
         
-    status_text.text("Finished processing pipeline!")
+    progress_bar.progress(1.0)
+    
+    if halt_processing:
+        status_text.text("Stopped early due to API limits.")
+    else:
+        status_text.text("Finished processing pipeline!")
+        st.sidebar.success(f"Successfully processed {len(records)} records!")
     
     if records:
         final_new_df = pd.DataFrame(records)
-        master_df = pd.read_csv(db_file)
+        master_df = pd.read_csv(DB_FILE)
         combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
-        save_with_ordered_columns(combined_df, db_file)
-        st.sidebar.success(f"Added {len(final_new_df)} processed records!")
-        time.sleep(2)
-        st.rerun()
+        save_with_ordered_columns(combined_df, DB_FILE)
+        
+        if halt_processing:
+            # We don't rerun if it halted, so the user can read the error message
+            st.stop()
+        else:
+            time.sleep(2)
+            st.rerun()
 
 # ==========================================
 #        SIDEBAR: DATA ENTRY
@@ -420,14 +461,14 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
 
 st.sidebar.write("---")
 if st.sidebar.button("🗑️ Clear Entire Database"):
-    pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
+    pd.DataFrame(columns=CANONICAL_COLUMNS).to_csv(DB_FILE, index=False)
     st.rerun()
 
 # ==========================================
 #        MAIN UI: EXPLORER SETTINGS
 # ==========================================
 st.title("🌱 Phenology & Climate Dataset Builder")
-df = pd.read_csv(db_file)
+df = pd.read_csv(DB_FILE)
 
 with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
     if df.empty:
@@ -485,7 +526,7 @@ with tab1:
     col_btn1, col_btn2 = st.columns([1, 4])
     with col_btn1:
         if st.button("💾 Save Manual Edits", type="primary"):
-            save_with_ordered_columns(edited_df, db_file)
+            save_with_ordered_columns(edited_df, DB_FILE)
             st.success("Database updated!")
     with col_btn2:
         st.download_button("📥 Download Full Dataset (CSV)", data=edited_df.to_csv(index=False).encode('utf-8'), file_name="phenology_dataset.csv", mime="text/csv")
@@ -544,5 +585,5 @@ with tab4:
             df.at[target_idx, 'Fruiting'] = f2
             df.at[target_idx, 'Vegetative'] = f3
             df.at[target_idx, 'Phenology_Scored'] = True
-            save_with_ordered_columns(df, db_file)
+            save_with_ordered_columns(df, DB_FILE)
             st.rerun()
