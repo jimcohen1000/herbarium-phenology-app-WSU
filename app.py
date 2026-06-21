@@ -14,6 +14,16 @@ import numpy as np
 st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
 db_file = "specimen_ledger.csv"
+
+# 1. HARDCODED SCHEMA: Guarantees these columns never disappear
+cna_vars = [
+    "MAT","MWMT","MCMT","TD","MAP","MSP","AHM","SHM","DD_0","DD5",
+    "DD_18","DD18","NFFD","bFFP","eFFP","FFP","PAS","EMT","EXT","Eref","CMD",
+    "MAR","RH","CMI","DD1040","Tmax_wt","Tmax_sp","Tmax_sm","Tmax_at",
+    "Tmin_wt","Tmin_sp","Tmin_sm","Tmin_at","Tave_wt","Tave_sp","Tave_sm",
+    "Tave_at","PPT_wt","PPT_sp","PPT_sm","PPT_at"
+]
+
 base_headers = [
     "Data_Source", "Collector", "Col_Number", "Barcode", "Species",
     "Year", "DOY", "Latitude", "Longitude", "Elevation",
@@ -21,6 +31,8 @@ base_headers = [
     "Y_3Mo_prior_Tmean", "N_3Mo_prior_Tmean", "Tmean_Anomaly",
     "Y_3Mo_prior_PPT", "N_3Mo_prior_PPT", "PPT_Anomaly"
 ]
+for v in cna_vars: base_headers.append(f"Y_{v}")
+for v in cna_vars: base_headers.append(f"N_{v}")
 
 if not os.path.exists(db_file):
     pd.DataFrame(columns=base_headers).to_csv(db_file, index=False)
@@ -89,18 +101,21 @@ def get_climate_data(lat, lon, el, prd):
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
+        # 2. THE THROTTLE: Stops the server from blocking your requests
+        time.sleep(0.7) 
+        
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             return data[0] if isinstance(data, list) else data
-        elif res.status_code in [403, 429]:  # Catch rate limits and quota blocks
+        elif res.status_code in [403, 429]:  
             return {"API_LIMIT_REACHED": True}
     except: return {}
     return {}
 
 def get_climate_val(data_dict, prefix, m_str):
-    target1 = f"{prefix}{m_str}".lower()      # e.g., tave01 or ppt01
-    target2 = f"{prefix}_{m_str}".lower()     # e.g., tave_01 or ppt_01
+    target1 = f"{prefix}{m_str}".lower()      
+    target2 = f"{prefix}_{m_str}".lower()     
     for k, v in data_dict.items():
         key_lower = str(k).lower()
         if key_lower == target1 or key_lower == target2:
@@ -174,17 +189,16 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 
                 if (year_data and year_data.get("API_LIMIT_REACHED")) or (norm_data and norm_data.get("API_LIMIT_REACHED")):
                     climate_api_blocked = True
-                    st.sidebar.error("⚠️ ClimateNA download limit reached! Climate data will be blank for remaining records.")
+                    st.sidebar.error("⚠️ ClimateNA download limit reached! Data will be blank for remaining records.")
                     year_data, norm_data = {}, {}
                 
                 if year_data and norm_data:
                     for k, v in year_data.items(): 
-                        if k not in ["ID1", "ID2", "lat", "lon", "el", "prd", "varYSM", "period"]: row_dict[f"Y_{k}"] = v
+                        if f"Y_{k}" in base_headers: row_dict[f"Y_{k}"] = v
                     for k, v in norm_data.items(): 
-                        if k not in ["ID1", "ID2", "lat", "lon", "el", "prd", "varYSM", "period"]: row_dict[f"N_{k}"] = v
+                        if f"N_{k}" in base_headers: row_dict[f"N_{k}"] = v
                     
                     if doy is not None:
-                        # Calculated using the capped climate_year to preserve the exact chronological sequence
                         ty, tm = calc_prior_3_months(climate_year, doy)
                         if ty and tm:
                             prev_year_data = {}
@@ -201,26 +215,22 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                             for y_t, m_t in zip(ty, tm):
                                 m_str = f"{m_t:02d}"
                                 
-                                # Pull Temperature (tave) & Precipitation (ppt) for the baseline
                                 n_t = get_climate_val(norm_data, "tave", m_str)
                                 n_p = get_climate_val(norm_data, "ppt", m_str)
                                 if n_t is not None: n_t_vals.append(n_t)
                                 if n_p is not None: n_p_vals.append(n_p)
                                 
-                                # Pull Temperature (tave) & Precipitation (ppt) for the collection year proxy
                                 target_data = year_data if y_t >= climate_year else prev_year_data
                                 y_t_v = get_climate_val(target_data, "tave", m_str)
                                 y_p_v = get_climate_val(target_data, "ppt", m_str)
                                 if y_t_v is not None: y_t_vals.append(y_t_v)
                                 if y_p_v is not None: y_p_vals.append(y_p_v)
                             
-                            # Temperature Math (Average over 3 months)
                             if len(y_t_vals) == 3 and len(n_t_vals) == 3:
                                 row_dict['Y_3Mo_prior_Tmean'] = round(sum(y_t_vals)/3, 2)
                                 row_dict['N_3Mo_prior_Tmean'] = round(sum(n_t_vals)/3, 2)
                                 row_dict['Tmean_Anomaly'] = round(row_dict['Y_3Mo_prior_Tmean'] - row_dict['N_3Mo_prior_Tmean'], 2)
                             
-                            # Precipitation Math (Sum over 3 months)
                             if len(y_p_vals) == 3 and len(n_p_vals) == 3:
                                 row_dict['Y_3Mo_prior_PPT'] = round(sum(y_p_vals), 2)
                                 row_dict['N_3Mo_prior_PPT'] = round(sum(n_p_vals), 2)
@@ -249,19 +259,15 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
     with st.form("manual_entry_form"):
         st.markdown("**Add a New Specimen Record**")
         m_spp = st.text_input("Species Name:", placeholder="e.g., Lithospermum ruderale")
-        
         m_date = st.date_input("Collection Date:", value=datetime.now().date())
         m_yr = m_date.year
         m_doy = m_date.timetuple().tm_yday
-        
         c_m1, c_m2 = st.columns(2)
         with c_m1: m_col = st.text_input("Collector:")
         with c_m2: m_col_num = st.text_input("Col. Number:")
-        
         c_m3, c_m4 = st.columns(2)
         with c_m3: m_barcode = st.text_input("Barcode:")
         with c_m4: m_elev = st.number_input("Elev. Override:", format="%.2f", value=0.0)
-        
         c3, c4 = st.columns(2)
         with c3: m_lat = st.number_input("Latitude:", format="%.5f", value=0.0)
         with c4: m_lon = st.number_input("Longitude:", format="%.5f", value=0.0)
@@ -318,22 +324,13 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                                 if m.get('type') == 'StillImage' and m.get('identifier'):
                                     rec_url = m.get('identifier')
                                     break
-                                    
-                            if not rec_url: 
-                                continue 
-                            
+                            if not rec_url: continue 
                             rec_url = ensure_url_scheme(rec_url)
-                            
                             y = obs.get('year') or (int(obs['eventDate'][:4]) if obs.get('eventDate') else None)
                             m, d = obs.get('month'), obs.get('day')
-                            
-                            if not y or not m or not d:
-                                continue
-                                
-                            try:
-                                doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
-                            except:
-                                continue 
+                            if not y or not m or not d: continue
+                            try: doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
+                            except: continue 
 
                             raw_records.append({
                                 "Data_Source": "GBIF Herbarium", 
@@ -341,8 +338,7 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                                 "Col_Number": obs.get('recordNumber', ''),
                                 "Barcode": obs.get('catalogNumber', '') or obs.get('occurrenceID', ''),
                                 "Species": obs.get('species', gbif_spp), 
-                                "Year": safe_int(y),
-                                "DOY": doy, 
+                                "Year": safe_int(y), "DOY": doy, 
                                 "Latitude": obs.get('decimalLatitude'), 
                                 "Longitude": obs.get('decimalLongitude'), 
                                 "Elevation": obs.get('elevation', pd.NA), 
@@ -387,9 +383,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                         for obs in results:
                             rec_url = obs.get('uri', '')
                             if not rec_url: continue
-                            
                             rec_url = ensure_url_scheme(rec_url)
-                            
                             pg = obs.get('place_guess', '').lower()
                             if s_list and not any(s in pg for s in s_list): continue
                             if c_list and not any(c in pg for c in c_list): continue
@@ -405,8 +399,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                 try:
                                     dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
                                     obs_year, obs_doy = dt.year, dt.timetuple().tm_yday
-                                except: 
-                                    continue 
+                                except: continue 
                                     
                                 raw_records.append({
                                     "Data_Source": "iNaturalist", 
@@ -436,45 +429,41 @@ if st.sidebar.button("🗑️ Clear Entire Database"):
 st.title("🌱 Phenology & Climate Dataset Builder")
 df = pd.read_csv(db_file)
 
-with st.expander("⚙️ Global Analysis & Outlier Settings (Affects Map & Graph)", expanded=True):
+with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
     if df.empty:
         st.info("Your database is empty. Fetch or add records first.")
         plot_df = pd.DataFrame()
     else:
         sources = df['Data_Source'].fillna('Unknown').unique().tolist()
         species = df['Species'].dropna().unique().tolist()
-        
         c1, c2 = st.columns(2)
         with c1: sel_src = st.multiselect("Filter Data Source:", sources, default=sources)
         with c2: sel_spp = st.multiselect("Filter Species:", species, default=species)
         
         plot_df = df[df['Data_Source'].isin(sel_src) & df['Species'].isin(sel_spp)].copy()
-        
         for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
             if col in plot_df.columns: plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
         for col in [c for c in plot_df.columns if c.startswith('Y_') or c.startswith('N_')]:
             plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
 
         num_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
-        
         st.markdown("---")
         s_c1, s_c2, s_c3 = st.columns([1, 1, 2])
         if len(num_cols) >= 2:
             with s_c1: selected_x = st.selectbox("X-Axis (For Trendline):", num_cols, index=num_cols.index('Year') if 'Year' in num_cols else 0)
-            with s_c2: selected_y = st.selectbox("Y-Axis (For Trendline & Outliers):", num_cols, index=num_cols.index('DOY') if 'DOY' in num_cols else 1)
+            with s_c2: selected_y = st.selectbox("Y-Axis (For Trendline):", num_cols, index=num_cols.index('DOY') if 'DOY' in num_cols else 1)
             with s_c3:
                 use_outlier_filter = st.checkbox(f"Highlight Outliers based on {selected_y}", value=False)
                 if use_outlier_filter:
-                    std_devs = st.slider("Flag data outside standard deviations:", 1.0, 5.0, 2.5, 0.1)
+                    std_devs = st.slider("Flag outside standard deviations:", 1.0, 5.0, 2.5, 0.1)
         
         plot_df['Is_Outlier'] = False
         if use_outlier_filter and len(plot_df.dropna(subset=[selected_y])) > 0:
             valid_y_df = plot_df.dropna(subset=[selected_y])
             mean_y, std_y = valid_y_df[selected_y].mean(), valid_y_df[selected_y].std()
             plot_df['Is_Outlier'] = np.abs(plot_df[selected_y] - mean_y) > (std_devs * std_y)
-            
             outlier_count = plot_df['Is_Outlier'].sum()
-            st.info(f"Identified **{outlier_count}** outliers (outside {mean_y:.1f} ± {std_devs*std_y:.1f}). They will be highlighted on the map and excluded from the graph trendline.")
+            st.info(f"Identified **{outlier_count}** outliers (outside {mean_y:.1f} ± {std_devs*std_y:.1f}).")
         
         plot_df['Map_Label'] = plot_df['Species'] + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
 
@@ -487,11 +476,7 @@ with tab1:
     st.info("Edit your full CSV here. Checking the phenology boxes here also updates the 'Phenology_Scored' status.")
     edited_df = st.data_editor(
         df, num_rows="dynamic", use_container_width=True,
-        column_config={
-            "URL": st.column_config.LinkColumn("Record Link"),
-            "Year": st.column_config.NumberColumn("Year", format="%d"),
-            "DOY": st.column_config.NumberColumn("DOY", format="%d")
-        }
+        column_config={"URL": st.column_config.LinkColumn("Record Link"), "Year": st.column_config.NumberColumn("Year", format="%d"), "DOY": st.column_config.NumberColumn("DOY", format="%d")}
     )
     for idx, row in edited_df.iterrows():
         if (row['Flowering'] or row['Fruiting'] or row['Vegetative']) and not row['Phenology_Scored']:
@@ -509,15 +494,10 @@ with tab2:
     if plot_df.empty: st.warning("No data to map.")
     else:
         map_df = plot_df.dropna(subset=['Latitude', 'Longitude']).copy()
-        if map_df.empty:
-            st.warning("No coordinate data available in the filtered dataset.")
+        if map_df.empty: st.warning("No coordinate data available in the filtered dataset.")
         else:
             map_df['Data_Source'] = map_df['Data_Source'].fillna('Unknown')
-            fig_map = px.scatter_mapbox(
-                map_df, lat="Latitude", lon="Longitude", color="Map_Label",
-                hover_data=["Year", "DOY", "Data_Source", "Collector"],
-                zoom=3, mapbox_style="carto-positron", title="Specimen Collection Sites"
-            )
+            fig_map = px.scatter_mapbox(map_df, lat="Latitude", lon="Longitude", color="Map_Label", hover_data=["Year", "DOY", "Data_Source", "Collector"], zoom=3, mapbox_style="carto-positron", title="Specimen Collection Sites")
             fig_map.update_traces(marker=dict(size=9, opacity=0.8))
             fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(fig_map, use_container_width=True)
@@ -527,17 +507,9 @@ with tab3:
     elif len(num_cols) < 2: st.warning("Not enough numeric columns to graph.")
     else:
         valid_plot_df = plot_df.dropna(subset=[selected_x, selected_y]).copy()
-        
         valid_plot_df['Point_Type'] = valid_plot_df['Is_Outlier'].apply(lambda x: 'Outlier' if x else 'Normal')
-        
         if len(valid_plot_df) >= 2:
-            fig = px.scatter(
-                valid_plot_df, x=selected_x, y=selected_y, 
-                color='Species' if 'Species' in valid_plot_df.columns else None,
-                symbol='Point_Type', symbol_map={'Normal': 'circle', 'Outlier': 'x'},
-                hover_data=['Collector', 'Year', 'DOY', 'Data_Source'], template="streamlit"
-            )
-            
+            fig = px.scatter(valid_plot_df, x=selected_x, y=selected_y, color='Species' if 'Species' in valid_plot_df.columns else None, symbol='Point_Type', symbol_map={'Normal': 'circle', 'Outlier': 'x'}, hover_data=['Collector', 'Year', 'DOY', 'Data_Source'], template="streamlit")
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
             if len(trend_df) > 1:
                 x_v, y_v = trend_df[selected_x].values, trend_df[selected_y].values
@@ -547,36 +519,26 @@ with tab3:
                     lx = np.array([min(x_v), max(x_v)])
                     fig.add_scatter(x=lx, y=slope * lx + intercept, mode='lines', name='Trend (Normals Only)', line=dict(color='black', dash='dash'))
                     st.success(f"📈 **Trendline (Excluding Outliers):** y = {slope:.3f}x {'+' if intercept>=0 else '-'} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
-            
             fig.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             st.plotly_chart(fig, use_container_width=True)
 
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
     unscored = df[(df['Phenology_Scored'] == False) & (df['URL'].notna()) & (df['URL'].str.strip() != '') & (df['URL'] != 'Manual')]
-    
-    if unscored.empty:
-        st.success("🎉 All URL records in the database have been scored!")
+    if unscored.empty: st.success("🎉 All URL records in the database have been scored!")
     else:
         st.info(f"You have **{len(unscored)}** unscored records remaining.")
         target_idx = st.selectbox("Select Record:", unscored.index, format_func=lambda x: f"Index {x}: {df.loc[x, 'Species']} ({df.loc[x, 'Data_Source']}) - Year {df.loc[x, 'Year']}")
-        
         row = df.loc[target_idx]
-        
         safe_url = ensure_url_scheme(row['URL'])
-        
         st.link_button("🔗 Click Here to View Original Specimen Image/Page", safe_url, type="primary", use_container_width=True)
-        
         st.caption("If the button above does not work, copy and paste this link into your browser:")
         st.code(safe_url, language="text")
-        
         st.write("---")
-        
         c_s1, c_s2, c_s3 = st.columns(3)
         with c_s1: f1 = st.checkbox("🌸 Flowering", value=bool(row['Flowering']), key=f"f1_{target_idx}")
         with c_s2: f2 = st.checkbox("🍒 Fruiting", value=bool(row['Fruiting']), key=f"f2_{target_idx}")
         with c_s3: f3 = st.checkbox("🍃 Vegetative (Leaves)", value=bool(row['Vegetative']), key=f"f3_{target_idx}")
-        
         if st.button("💾 Save Phenology & Load Next", type="secondary"):
             df.at[target_idx, 'Flowering'] = f1
             df.at[target_idx, 'Fruiting'] = f2
