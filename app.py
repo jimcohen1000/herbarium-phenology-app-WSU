@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import os
 import time
+import re
 from datetime import datetime
 import urllib.parse
 import plotly.express as px
@@ -102,8 +103,8 @@ def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
     
-    # THE FIX: Added &varYSM=YSM back to the URL to resolve the HTTP 400 Bad Request error
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
+    # Unified request using &varYSM=YSM alongside .ann
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     
     try:
@@ -143,24 +144,54 @@ def calc_prior_3_months(year, doy):
     except: return None, None
 
 def get_climate_val(data_dict, prefix, m_str):
+    """Safely extracts seasonal/monthly values directly from the API dict during calculation"""
     if not data_dict or "error" in data_dict: return None
     
-    # Bulletproof searching allows for padded ("01") and unpadded ("1") strings
     m_strs = [m_str, str(int(m_str))]
-    prefixes = [prefix]
+    prefixes = [prefix.lower()]
     if prefix.lower() == "ppt":
-        prefixes.extend(["pr", "precip"]) # Covers variations just in case
+        prefixes.extend(["pr", "precip"]) 
         
     for pfx in prefixes:
         for m in m_strs:
-            t1 = f"{pfx}{m}".lower()
-            t2 = f"{pfx}_{m}".lower()
+            t1 = f"{pfx}{m}"
+            t2 = f"{pfx}_{m}"
             for k, v in data_dict.items():
                 k_lower = str(k).strip().lower()
                 if k_lower == t1 or k_lower == t2:
                     try: return float(v)
                     except: pass
     return None
+
+def map_api_to_canonical(api_dict, prefix="Y_"):
+    """Bulletproof mapping to perfectly match any API casing/format to our CSV structure"""
+    mapped_dict = {}
+    canonical_lower = {c.lower(): c for c in CANONICAL_COLUMNS if c.startswith(prefix)}
+    
+    for k, v in api_dict.items():
+        k_str = str(k).strip()
+        
+        # 1. Direct match check (e.g. MAT -> y_mat)
+        exact_match = f"{prefix}{k_str}".lower()
+        if exact_match in canonical_lower:
+            mapped_dict[canonical_lower[exact_match]] = v
+            continue
+            
+        # 2. Padded vs Unpadded numbers matching (e.g. Tmax1 -> y_tmax01)
+        m = re.match(r"^([a-zA-Z_0-9]+?)_?(\d{1,2})$", k_str)
+        if m:
+            base_var = m.group(1)
+            num = m.group(2).zfill(2)
+            
+            try1 = f"{prefix}{base_var}{num}".lower()
+            try2 = f"{prefix}{base_var}_{num}".lower()
+            
+            if try1 in canonical_lower:
+                mapped_dict[canonical_lower[try1]] = v
+            elif try2 in canonical_lower:
+                mapped_dict[canonical_lower[try2]] = v
+                
+    return mapped_dict
 
 def thin_and_cap_data(df, target_limit, max_per_year):
     valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'DOY', 'URL']).copy()
@@ -203,9 +234,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     status_text = st.sidebar.empty()
     alert_placeholder = st.sidebar.empty() 
     
-    # Create a lookup dictionary to make column mapping 100% case-insensitive
-    canonical_lower_map = {col.lower(): col for col in CANONICAL_COLUMNS}
-    
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         progress_bar.progress(count / len(cleaned_df))
         
@@ -223,6 +251,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
             
+            # Resetting cap to 2024 to ensure recent historical lookups
             climate_year = min(year, 2024) 
             status_text.text(f"Fetching ClimateNA for Year_{climate_year}.ann... ({count+1}/{len(cleaned_df)})")
             
@@ -230,8 +259,8 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
             
             sys_error = None
-            if "error" in year_data and year_data.get("systemic"): sys_error = year_data["error"]
-            elif "error" in norm_data and norm_data.get("systemic"): sys_error = norm_data["error"]
+            if isinstance(year_data, dict) and "error" in year_data and year_data.get("systemic"): sys_error = year_data["error"]
+            elif isinstance(norm_data, dict) and "error" in norm_data and norm_data.get("systemic"): sys_error = norm_data["error"]
                 
             if sys_error:
                 alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\n**Details:** {sys_error}\n\n*Saved the {len(records)} records successfully processed up to this point.*")
@@ -240,16 +269,13 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
-            # Case-insensitive extraction captures all monthly and seasonal arrays perfectly
-            for k, v in year_data.items(): 
-                t_col = f"Y_{str(k).strip()}".lower()
-                if t_col in canonical_lower_map:
-                    row_dict[canonical_lower_map[t_col]] = v
-                    
-            for k, v in norm_data.items(): 
-                t_col = f"N_{str(k).strip()}".lower()
-                if t_col in canonical_lower_map:
-                    row_dict[canonical_lower_map[t_col]] = v
+            # Safely map all returned variables (Annual, Seasonal, Monthly)
+            if isinstance(year_data, dict):
+                y_mapped = map_api_to_canonical(year_data, "Y_")
+                row_dict.update(y_mapped)
+            if isinstance(norm_data, dict):
+                n_mapped = map_api_to_canonical(norm_data, "N_")
+                row_dict.update(n_mapped)
             
             # 3 Month Anomalies Calculation
             if doy is not None:
