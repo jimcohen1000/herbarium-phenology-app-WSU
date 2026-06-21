@@ -9,7 +9,7 @@ import os
 import numpy as np
 
 # ==========================================
-#          APP SETUP & CONFIG
+#        APP SETUP & CONFIG
 # ==========================================
 st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
@@ -92,13 +92,17 @@ def get_climate_data(lat, lon, el, prd):
         if res.status_code == 200:
             data = res.json()
             return data[0] if isinstance(data, list) else data
+        elif res.status_code in [403, 429]:  # Catch rate limits and quota blocks
+            return {"API_LIMIT_REACHED": True}
     except: return {}
     return {}
 
 def get_climate_val(data_dict, prefix, m_str):
-    target = f"{prefix}{m_str}".lower()
+    target1 = f"{prefix}{m_str}".lower()      # e.g., tave01
+    target2 = f"{prefix}_{m_str}".lower()     # e.g., tave_01
     for k, v in data_dict.items():
-        if k.lower() == target:
+        key_lower = str(k).lower()
+        if key_lower == target1 or key_lower == target2:
             try: return float(v)
             except: return None
     return None
@@ -109,7 +113,8 @@ def save_with_ordered_columns(df_to_save, filepath):
     df_to_save[new_order].to_csv(filepath, index=False)
 
 def thin_and_cap_data(df, target_limit, max_per_year):
-    valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'URL']).copy()
+    # Enforces DOY is present
+    valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'DOY', 'URL']).copy()
     valid_df = valid_df[valid_df['URL'].str.strip() != '']
     valid_df = valid_df.sample(frac=1).reset_index(drop=True)
     capped_df = valid_df.groupby('Year').head(max_per_year).sort_values('Year')
@@ -136,9 +141,16 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     st.sidebar.text(f"Applying de-clustering & year distribution...")
     cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year)
     
+    # Prevents zero division error if all records are dropped
+    if cleaned_df.empty:
+        st.sidebar.warning("No valid records remained after filtering (e.g. missing DOY or images).")
+        return
+
     records = []
     progress_bar = st.sidebar.progress(0.0)
     status_text = st.sidebar.empty()
+    
+    climate_api_blocked = False # Flag to safely stop hitting API limits without crashing
     
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         row_dict = row.to_dict()
@@ -155,16 +167,18 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
             
-            if year is not None:
+            if year is not None and not climate_api_blocked:
                 climate_year = min(year, 2021) 
                 status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
                 
-                year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
-                if not year_data: year_data = get_climate_data(lat, lon, el, str(climate_year))
+                year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}") or get_climate_data(lat, lon, el, str(climate_year))
+                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990") or get_climate_data(lat, lon, el, "1961-1990") or get_climate_data(lat, lon, el, "1961_1990")
                 
-                norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
-                if not norm_data: norm_data = get_climate_data(lat, lon, el, "1961-1990")
-                if not norm_data: norm_data = get_climate_data(lat, lon, el, "1961_1990")
+                # Check for API limits
+                if (year_data and year_data.get("API_LIMIT_REACHED")) or (norm_data and norm_data.get("API_LIMIT_REACHED")):
+                    climate_api_blocked = True
+                    st.sidebar.error("⚠️ ClimateNA download limit reached! Climate data will be blank for remaining records.")
+                    year_data, norm_data = {}, {}
                 
                 if year_data and norm_data:
                     for k, v in year_data.items(): 
@@ -179,8 +193,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                             ty_capped = [min(y, 2021) for y in ty]
                             
                             if min(ty_capped) < climate_year: 
-                                prev_year_data = get_climate_data(lat, lon, el, f"Year_{min(ty_capped)}")
-                                if not prev_year_data: prev_year_data = get_climate_data(lat, lon, el, str(min(ty_capped)))
+                                prev_year_data = get_climate_data(lat, lon, el, f"Year_{min(ty_capped)}") or get_climate_data(lat, lon, el, str(min(ty_capped)))
+                                if prev_year_data and prev_year_data.get("API_LIMIT_REACHED"): 
+                                    prev_year_data = {}
                             
                             y_vals, n_vals = [], []
                             for y_t_cap, m_t in zip(ty_capped, tm):
@@ -284,22 +299,40 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                         results = data.get('results', [])
                         if not results: break
                         for obs in results:
-                            rec_url = obs.get('references', '') or (obs.get('media')[0].get('identifier', '') if obs.get('media') else '')
-                            if not rec_url: continue
+                            # 1. Force the record to have an actual image
+                            media = obs.get('media', [])
+                            rec_url = ""
+                            for m in media:
+                                if m.get('type') == 'StillImage' and m.get('identifier'):
+                                    rec_url = m.get('identifier')
+                                    break # Found an image, stop looking
+                                    
+                            if not rec_url: 
+                                continue # Skip this record entirely if there's no image
                             
                             # Clean and ensure URL has proper scheme
                             rec_url = ensure_url_scheme(rec_url)
                             
+                            # Date parsing enforcing Day, Month, and Year
                             y = obs.get('year') or (int(obs['eventDate'][:4]) if obs.get('eventDate') else None)
                             m, d = obs.get('month'), obs.get('day')
-                            doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday if y and m and d else pd.NA
+                            
+                            # Force skip if exact date is missing
+                            if not y or not m or not d:
+                                continue
+                                
+                            try:
+                                doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
+                            except:
+                                continue # Skip if date is invalid (e.g., Feb 30)
+
                             raw_records.append({
                                 "Data_Source": "GBIF Herbarium", 
                                 "Collector": obs.get('recordedBy', ''),
                                 "Col_Number": obs.get('recordNumber', ''),
                                 "Barcode": obs.get('catalogNumber', '') or obs.get('occurrenceID', ''),
                                 "Species": obs.get('species', gbif_spp), 
-                                "Year": safe_int(y) if y else pd.NA,
+                                "Year": safe_int(y),
                                 "DOY": doy, 
                                 "Latitude": obs.get('decimalLatitude'), 
                                 "Longitude": obs.get('decimalLongitude'), 
@@ -364,7 +397,8 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                 try:
                                     dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
                                     obs_year, obs_doy = dt.year, dt.timetuple().tm_yday
-                                except: obs_year, obs_doy = pd.NA, pd.NA
+                                except: 
+                                    continue # Skip record if it lacks a precise observation date
                                     
                                 raw_records.append({
                                     "Data_Source": "iNaturalist", 
@@ -389,7 +423,7 @@ if st.sidebar.button("🗑️ Clear Entire Database"):
     st.rerun()
 
 # ==========================================
-#          MAIN UI: EXPLORER SETTINGS
+#        MAIN UI: EXPLORER SETTINGS
 # ==========================================
 st.title("🌱 Phenology & Climate Dataset Builder")
 df = pd.read_csv(db_file)
@@ -437,7 +471,7 @@ with st.expander("⚙️ Global Analysis & Outlier Settings (Affects Map & Graph
         plot_df['Map_Label'] = plot_df['Species'] + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
 
 # ==========================================
-#          MAIN UI: TABS
+#        MAIN UI: TABS
 # ==========================================
 tab1, tab2, tab3, tab4 = st.tabs(["🗃️ Data Ledger", "🗺️ Map View", "📊 Trends & Outliers", "🎯 Rapid Scoring"])
 
