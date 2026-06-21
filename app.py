@@ -142,52 +142,67 @@ def calc_prior_3_months(year, doy):
         return target_years, target_months
     except: return None, None
 
-def normalize_ppt_key(k_str):
-    """Maps any variation of precipitation back to standard 'ppt'"""
-    k_str = k_str.lower()
-    if k_str.startswith('prcp'): k_str = k_str.replace('prcp', 'ppt', 1)
-    elif k_str.startswith('precip'): k_str = k_str.replace('precip', 'ppt', 1)
-    elif k_str.startswith('pr') and k_str != 'prd': k_str = k_str.replace('pr', 'ppt', 1)
-    return k_str
-
 def get_climate_val(data_dict, prefix, m_str):
-    """Safely extracts seasonal/monthly values directly from the API dict during calculation"""
+    """Safely extracts seasonal/monthly values using strict PR/Prec formatting explicitly for anomalies"""
     if not data_dict or "error" in data_dict: return None
     
-    m_strs = [m_str, str(int(m_str))]
-    prefixes = [prefix.lower()]
-    if prefix.lower() == "ppt":
-        prefixes.extend(["pr", "precip", "prcp"]) 
-        
-    for pfx in prefixes:
-        for m in m_strs:
-            t1 = f"{pfx}{m}".lower()
-            t2 = f"{pfx}_{m}".lower()
-            for k, v in data_dict.items():
-                k_lower = str(k).strip().lower()
-                if k_lower == t1 or k_lower == t2:
-                    try: return float(v)
-                    except: pass
+    target_m_padded = m_str.zfill(2)
+    target_m_unpadded = str(int(m_str))
+    
+    if prefix.lower() == "tave":
+        for k, v in data_dict.items():
+            k_lower = str(k).strip().lower()
+            if k_lower in [f"tave{target_m_padded}", f"tave_{target_m_padded}", f"tave{target_m_unpadded}"]:
+                try: return float(v)
+                except: pass
+                
+    elif prefix.lower() == "ppt":
+        for k, v in data_dict.items():
+            k_lower = str(k).strip().lower()
+            # Hunt down ALL combinations of precipitation API variables (Prec_01, PPT01, pr_1)
+            valid_keys = [
+                f"prec_{target_m_padded}", f"prec{target_m_padded}", f"prec_{target_m_unpadded}", f"prec{target_m_unpadded}",
+                f"ppt_{target_m_padded}", f"ppt{target_m_padded}", f"ppt_{target_m_unpadded}", f"ppt{target_m_unpadded}",
+                f"pr_{target_m_padded}", f"pr{target_m_padded}"
+            ]
+            if k_lower in valid_keys:
+                try: return float(v)
+                except: pass
+                
     return None
 
 def map_api_to_canonical(api_dict, prefix="Y_"):
-    """Bulletproof mapping to perfectly match any API casing/format to our CSV structure"""
+    """Explicitly translates Prec_01 to PPT01 to unify monthly and seasonal CSV columns"""
     mapped_dict = {}
     canonical_lower = {c.lower(): c for c in CANONICAL_COLUMNS if c.startswith(prefix)}
     
     for k, v in api_dict.items():
         k_str = str(k).strip().lower()
         
-        # Aggressively normalize any precipitation alias to 'ppt' so the CSV receives it correctly
-        k_str = normalize_ppt_key(k_str)
-        
-        # 1. Direct match check (e.g. MAT -> y_mat)
+        # Explicitly map Prec_xx to PPTxx for monthly variables
+        m_prec = re.match(r"^prec_?(\d{1,2})$", k_str)
+        if m_prec:
+            num = m_prec.group(1).zfill(2)
+            target = f"{prefix}ppt{num}".lower()
+            if target in canonical_lower:
+                mapped_dict[canonical_lower[target]] = v
+            continue
+            
+        # Catch any pr_xx mappings for monthly variables
+        m_pr = re.match(r"^pr_?(\d{1,2})$", k_str)
+        if m_pr:
+            num = m_pr.group(1).zfill(2)
+            target = f"{prefix}ppt{num}".lower()
+            if target in canonical_lower:
+                mapped_dict[canonical_lower[target]] = v
+            continue
+
+        # Normal logic for matching standard variables (like MAT, PPT_wt, etc.)
         exact_match = f"{prefix}{k_str}".lower()
         if exact_match in canonical_lower:
             mapped_dict[canonical_lower[exact_match]] = v
             continue
             
-        # 2. Padded vs Unpadded numbers matching (e.g. Tmax1 -> y_tmax01)
         m = re.match(r"^([a-z0-9]+?)_?(\d{1,2})$", k_str)
         if m:
             base_var = m.group(1)
@@ -261,7 +276,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
             
-            # Resetting cap to 2024 to ensure recent historical lookups
             climate_year = min(year, 2024) 
             status_text.text(f"Fetching ClimateNA for Year_{climate_year}.ann... ({count+1}/{len(cleaned_df)})")
             
@@ -279,7 +293,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
-            # Safely map all returned variables (Annual, Seasonal, Monthly) with PR->PPT mapping
+            # Maps BOTH monthly and seasonal arrays flawlessly using the new engine
             if isinstance(year_data, dict):
                 y_mapped = map_api_to_canonical(year_data, "Y_")
                 row_dict.update(y_mapped)
