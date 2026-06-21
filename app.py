@@ -104,7 +104,6 @@ def get_climate_data(lat, lon, el, prd):
         return {"error": "Elevation missing", "systemic": False}
     
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
-    # Unified request using &varYSM=YSM alongside .ann
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     
     try:
@@ -143,6 +142,14 @@ def calc_prior_3_months(year, doy):
         return target_years, target_months
     except: return None, None
 
+def normalize_ppt_key(k_str):
+    """Maps any variation of precipitation back to standard 'ppt'"""
+    k_str = k_str.lower()
+    if k_str.startswith('prcp'): k_str = k_str.replace('prcp', 'ppt', 1)
+    elif k_str.startswith('precip'): k_str = k_str.replace('precip', 'ppt', 1)
+    elif k_str.startswith('pr') and k_str != 'prd': k_str = k_str.replace('pr', 'ppt', 1)
+    return k_str
+
 def get_climate_val(data_dict, prefix, m_str):
     """Safely extracts seasonal/monthly values directly from the API dict during calculation"""
     if not data_dict or "error" in data_dict: return None
@@ -150,12 +157,12 @@ def get_climate_val(data_dict, prefix, m_str):
     m_strs = [m_str, str(int(m_str))]
     prefixes = [prefix.lower()]
     if prefix.lower() == "ppt":
-        prefixes.extend(["pr", "precip"]) 
+        prefixes.extend(["pr", "precip", "prcp"]) 
         
     for pfx in prefixes:
         for m in m_strs:
-            t1 = f"{pfx}{m}"
-            t2 = f"{pfx}_{m}"
+            t1 = f"{pfx}{m}".lower()
+            t2 = f"{pfx}_{m}".lower()
             for k, v in data_dict.items():
                 k_lower = str(k).strip().lower()
                 if k_lower == t1 or k_lower == t2:
@@ -169,7 +176,10 @@ def map_api_to_canonical(api_dict, prefix="Y_"):
     canonical_lower = {c.lower(): c for c in CANONICAL_COLUMNS if c.startswith(prefix)}
     
     for k, v in api_dict.items():
-        k_str = str(k).strip()
+        k_str = str(k).strip().lower()
+        
+        # Aggressively normalize any precipitation alias to 'ppt' so the CSV receives it correctly
+        k_str = normalize_ppt_key(k_str)
         
         # 1. Direct match check (e.g. MAT -> y_mat)
         exact_match = f"{prefix}{k_str}".lower()
@@ -178,7 +188,7 @@ def map_api_to_canonical(api_dict, prefix="Y_"):
             continue
             
         # 2. Padded vs Unpadded numbers matching (e.g. Tmax1 -> y_tmax01)
-        m = re.match(r"^([a-zA-Z_0-9]+?)_?(\d{1,2})$", k_str)
+        m = re.match(r"^([a-z0-9]+?)_?(\d{1,2})$", k_str)
         if m:
             base_var = m.group(1)
             num = m.group(2).zfill(2)
@@ -269,7 +279,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
-            # Safely map all returned variables (Annual, Seasonal, Monthly)
+            # Safely map all returned variables (Annual, Seasonal, Monthly) with PR->PPT mapping
             if isinstance(year_data, dict):
                 y_mapped = map_api_to_canonical(year_data, "Y_")
                 row_dict.update(y_mapped)
