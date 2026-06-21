@@ -102,8 +102,9 @@ def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
     
+    # Notice varYSM=YSM is removed to enforce ALL variables to return
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
-    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}"
     
     try:
         time.sleep(0.7) # Throttling to prevent IP blocks
@@ -141,13 +142,22 @@ def calc_prior_3_months(year, doy):
 
 def get_climate_val(data_dict, prefix, m_str):
     if not data_dict or "error" in data_dict: return None
-    t1 = f"{prefix}{m_str}".lower()
-    t2 = f"{prefix}_{m_str}".lower()
-    for k, v in data_dict.items():
-        k_lower = str(k).lower()
-        if k_lower == t1 or k_lower == t2:
-            try: return float(v)
-            except: return None
+    
+    # Bulletproof searching allows for padded ("01") and unpadded ("1") strings
+    m_strs = [m_str, str(int(m_str))]
+    prefixes = [prefix]
+    if prefix.lower() == "ppt":
+        prefixes.extend(["pr", "precip"]) # Covers variations just in case
+        
+    for pfx in prefixes:
+        for m in m_strs:
+            t1 = f"{pfx}{m}".lower()
+            t2 = f"{pfx}_{m}".lower()
+            for k, v in data_dict.items():
+                k_lower = str(k).strip().lower()
+                if k_lower == t1 or k_lower == t2:
+                    try: return float(v)
+                    except: pass
     return None
 
 def thin_and_cap_data(df, target_limit, max_per_year):
@@ -191,6 +201,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     status_text = st.sidebar.empty()
     alert_placeholder = st.sidebar.empty() 
     
+    # We create a lookup dictionary to make column mapping 100% case-insensitive
+    canonical_lower_map = {col.lower(): col for col in CANONICAL_COLUMNS}
+    
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         progress_bar.progress(count / len(cleaned_df))
         
@@ -219,18 +232,24 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             elif "error" in norm_data and norm_data.get("systemic"): sys_error = norm_data["error"]
                 
             if sys_error:
-                alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\nThe server temporarily blocked requests.\n\n**Details:** {sys_error}\n\n*Saved the {len(records)} records successfully processed up to this point.*")
+                alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\n**Details:** {sys_error}\n\n*Saved the {len(records)} records successfully processed up to this point.*")
                 break 
                 
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
+            # THE FIX: Case-insensitive extraction captures all monthly and seasonal arrays perfectly
             for k, v in year_data.items(): 
-                if f"Y_{k}" in CANONICAL_COLUMNS: row_dict[f"Y_{k}"] = v
+                t_col = f"Y_{str(k).strip()}".lower()
+                if t_col in canonical_lower_map:
+                    row_dict[canonical_lower_map[t_col]] = v
+                    
             for k, v in norm_data.items(): 
-                if f"N_{k}" in CANONICAL_COLUMNS: row_dict[f"N_{k}"] = v
+                t_col = f"N_{str(k).strip()}".lower()
+                if t_col in canonical_lower_map:
+                    row_dict[canonical_lower_map[t_col]] = v
             
-            # 3 Month Anomalies Calculation (FIXED: Means calculated for both Temp and Precip)
+            # 3 Month Anomalies Calculation
             if doy is not None:
                 ty, tm = calc_prior_3_months(climate_year, doy)
                 if ty and tm:
@@ -240,7 +259,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                     if min_y < climate_year: 
                         prev_year_data = get_climate_data(lat, lon, el, f"Year_{min_y}.ann")
                         if "error" in prev_year_data and prev_year_data.get("systemic"):
-                            alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\nThe server blocked requests during a 3-month lookup.\n\n*Saved {len(records)} successful records.*")
+                            alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\n*Saved {len(records)} successful records.*")
                             break
                         elif "error" in prev_year_data:
                             continue 
@@ -258,16 +277,15 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                         target_data = year_data if y_t >= climate_year else prev_year_data
                         y_t_v = get_climate_val(target_data, "tave", m_str)
                         y_p_v = get_climate_val(target_data, "ppt", m_str)
+                        
                         if y_t_v is not None: y_t_vals.append(y_t_v)
                         if y_p_v is not None: y_p_vals.append(y_p_v)
                     
-                    # Mean calculation for temperature
                     if len(y_t_vals) == 3 and len(n_t_vals) == 3:
                         row_dict['Y_3Mo_prior_mean_Tave'] = round(sum(y_t_vals) / 3.0, 2)
                         row_dict['N_3Mo_prior_mean_Tave'] = round(sum(n_t_vals) / 3.0, 2)
                         row_dict['Tave_Anomaly'] = round(row_dict['Y_3Mo_prior_mean_Tave'] - row_dict['N_3Mo_prior_mean_Tave'], 2)
                     
-                    # Mean calculation for precipitation (FIXED from Sum)
                     if len(y_p_vals) == 3 and len(n_p_vals) == 3:
                         row_dict['Y_3Mo_prior_mean_PPT'] = round(sum(y_p_vals) / 3.0, 2)
                         row_dict['N_3Mo_prior_mean_PPT'] = round(sum(n_p_vals) / 3.0, 2)
