@@ -142,6 +142,22 @@ def calc_prior_3_months(year, doy):
         return target_years, target_months
     except: return None, None
 
+def normalize_key(k_str):
+    """Accurately maps BOTH precipitation aliases and Degree Day mathematical symbols"""
+    k_str = k_str.lower()
+    
+    # 1. Map all PR/Prec/Prcp aliases strictly to 'ppt'
+    if k_str.startswith('precip'): k_str = k_str.replace('precip', 'ppt', 1)
+    elif k_str.startswith('prcp'): k_str = k_str.replace('prcp', 'ppt', 1)
+    elif k_str.startswith('prec'): k_str = k_str.replace('prec', 'ppt', 1)
+    elif k_str.startswith('pr') and not k_str.startswith('prd') and not k_str.startswith('ppt'): 
+        k_str = k_str.replace('pr', 'ppt', 1)
+        
+    # 2. Fix Degree Days symbols (e.g. DD<0 becomes DD_0, DD>5 becomes DD5)
+    k_str = k_str.replace('<', '_').replace('>', '')
+    
+    return k_str
+
 def get_climate_val(data_dict, prefix, m_str):
     """Safely extracts seasonal/monthly values using strict PR/Prec formatting explicitly for anomalies"""
     if not data_dict or "error" in data_dict: return None
@@ -158,13 +174,8 @@ def get_climate_val(data_dict, prefix, m_str):
                 
     elif prefix.lower() == "ppt":
         for k, v in data_dict.items():
-            k_lower = str(k).strip().lower()
-            # Hunt down ALL combinations of precipitation API variables (Prec_01, PPT01, pr_1)
-            valid_keys = [
-                f"prec_{target_m_padded}", f"prec{target_m_padded}", f"prec_{target_m_unpadded}", f"prec{target_m_unpadded}",
-                f"ppt_{target_m_padded}", f"ppt{target_m_padded}", f"ppt_{target_m_unpadded}", f"ppt{target_m_unpadded}",
-                f"pr_{target_m_padded}", f"pr{target_m_padded}"
-            ]
+            k_lower = normalize_key(str(k).strip())
+            valid_keys = [f"ppt_{target_m_padded}", f"ppt{target_m_padded}", f"ppt_{target_m_unpadded}", f"ppt{target_m_unpadded}"]
             if k_lower in valid_keys:
                 try: return float(v)
                 except: pass
@@ -172,40 +183,23 @@ def get_climate_val(data_dict, prefix, m_str):
     return None
 
 def map_api_to_canonical(api_dict, prefix="Y_"):
-    """Explicitly translates Prec_01 to PPT01 to unify monthly and seasonal CSV columns"""
+    """Explicitly maps API payload into Canonical Columns (Handles Monthlies, Seasonals, DDs, and PPTs)"""
     mapped_dict = {}
     canonical_lower = {c.lower(): c for c in CANONICAL_COLUMNS if c.startswith(prefix)}
     
     for k, v in api_dict.items():
-        k_str = str(k).strip().lower()
+        k_str = normalize_key(str(k).strip())
         
-        # Explicitly map Prec_xx to PPTxx for monthly variables
-        m_prec = re.match(r"^prec_?(\d{1,2})$", k_str)
-        if m_prec:
-            num = m_prec.group(1).zfill(2)
-            target = f"{prefix}ppt{num}".lower()
-            if target in canonical_lower:
-                mapped_dict[canonical_lower[target]] = v
-            continue
-            
-        # Catch any pr_xx mappings for monthly variables
-        m_pr = re.match(r"^pr_?(\d{1,2})$", k_str)
-        if m_pr:
-            num = m_pr.group(1).zfill(2)
-            target = f"{prefix}ppt{num}".lower()
-            if target in canonical_lower:
-                mapped_dict[canonical_lower[target]] = v
-            continue
-
-        # Normal logic for matching standard variables (like MAT, PPT_wt, etc.)
+        # 1. Direct match check (e.g. MAT -> y_mat)
         exact_match = f"{prefix}{k_str}".lower()
         if exact_match in canonical_lower:
             mapped_dict[canonical_lower[exact_match]] = v
             continue
             
-        m = re.match(r"^([a-z0-9]+?)_?(\d{1,2})$", k_str)
+        # 2. Padded vs Unpadded numbers matching (e.g. ppt_01 or ppt1 -> y_ppt01, dd_0_01 -> y_dd_001)
+        m = re.match(r"^([a-z0-9_]+?)_?(\d{1,2})$", k_str)
         if m:
-            base_var = m.group(1)
+            base_var = m.group(1).rstrip('_') # Strip trailing underscore if it exists
             num = m.group(2).zfill(2)
             
             try1 = f"{prefix}{base_var}{num}".lower()
@@ -222,7 +216,15 @@ def thin_and_cap_data(df, target_limit, max_per_year):
     valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'DOY', 'URL']).copy()
     valid_df = valid_df[valid_df['URL'].str.strip() != '']
     valid_df = valid_df.sample(frac=1).reset_index(drop=True)
-    capped_df = valid_df.groupby('Year').head(max_per_year).sort_values('Year')
+    
+    # Intelligently relax max_per_year if the requested target limit is high and data is sparse
+    current_max = max_per_year
+    capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
+    
+    while len(capped_df) < target_limit and current_max < 50 and len(capped_df) < len(valid_df):
+        current_max += 1
+        capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
+        
     unique_years = capped_df['Year'].unique()
     
     selected_years, last_y = [], -999
@@ -293,7 +295,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
-            # Maps BOTH monthly and seasonal arrays flawlessly using the new engine
             if isinstance(year_data, dict):
                 y_mapped = map_api_to_canonical(year_data, "Y_")
                 row_dict.update(y_mapped)
@@ -423,7 +424,10 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
             if e_min is not None or e_max is not None: base_url += f"&elevation={e_min if e_min else ''},{e_max if e_max else ''}"
 
             raw_records, offset, end_of_records = [], 0, False
-            while len(raw_records) < 3000 and not end_of_records and offset < 9000:
+            
+            # Speed fix: Cap the fetcher slightly above limit instead of pulling thousands of rows
+            max_to_fetch = max(g_limit * 10, 500)
+            while len(raw_records) < max_to_fetch and not end_of_records and offset < 9000:
                 try:
                     res = requests.get(base_url + f"&limit=300&offset={offset}", timeout=10)
                     if res.status_code == 200:
@@ -486,7 +490,8 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
             raw_records, page = [], 1
-            while len(raw_records) < 3000 and page <= 15:
+            max_to_fetch = max(i_limit * 10, 500)
+            while len(raw_records) < max_to_fetch and page <= 15:
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
                     res = requests.get(url, timeout=10)
