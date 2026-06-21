@@ -89,6 +89,9 @@ def get_climate_data(lat, lon, el, prd):
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     try:
+        # THROTTLE: Pauses for 0.6 seconds to prevent the ClimateNA API from blocking your IP
+        time.sleep(0.6) 
+        
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
