@@ -96,7 +96,7 @@ def get_climate_data(lat, lon, el, prd):
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     
     try:
-        time.sleep(0.7) # Crucial throttle to prevent IP blocking
+        time.sleep(0.7) # Throttling to prevent IP blocks
         res = requests.get(url, timeout=15)
         
         if res.status_code == 200:
@@ -184,7 +184,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         progress_bar.progress(count / len(cleaned_df))
         
-        # Initialize a pristine dictionary using our canonical schema
+        # Initialize dictionary matching canonical schema
         row_dict = {col: row.get(col, np.nan) for col in CANONICAL_COLUMNS if not (col.startswith("Y_") or col.startswith("N_") or col.endswith("_Anomaly"))}
         row_dict['Phenology_Scored'] = False
         
@@ -199,16 +199,12 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 el = fetched_el if fetched_el is not None else 0.0 
                 row_dict['Elevation'] = el
             
-            climate_year = min(year, 2021) 
-            status_text.text(f"Fetching ClimateNA for {climate_year}... ({count+1}/{len(cleaned_df)})")
+            climate_year = min(year, 2024) 
+            status_text.text(f"Fetching ClimateNA for Year_{climate_year}.ann... ({count+1}/{len(cleaned_df)})")
             
-            year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}")
-            if "error" in year_data:
-                year_data = get_climate_data(lat, lon, el, str(climate_year)) # fallback
-                
+            # Formatted properly with the individual historical year requirement (.ann)
+            year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}.ann")
             norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
-            if "error" in norm_data:
-                norm_data = get_climate_data(lat, lon, el, "1961_1990") # fallback
             
             # --- API RATE LIMIT DETECTION ---
             sys_error = None
@@ -216,13 +212,13 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             elif "error" in norm_data and norm_data.get("systemic"): sys_error = norm_data["error"]
                 
             if sys_error:
-                alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\nThe server temporarily blocked the app.\n\n**Details:** {sys_error}\n\n*Saved the {len(records)} records successfully processed up to this point and stopped fetching to prevent empty data.*")
-                break # Hard stop. Breaks loop, preventing blanks from appending
+                alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\nThe server temporarily blocked requests.\n\n**Details:** {sys_error}\n\n*Saved the {len(records)} records successfully processed up to this point.*")
+                break 
                 
             if "error" in year_data or "error" in norm_data:
-                continue # Non-systemic error (e.g. out of bounds coordinate). Skip row.
+                continue # Skip out-of-bounds coordinates
                 
-            # Map exact canonical columns
+            # Map parameters to dataset
             for k, v in year_data.items(): 
                 if f"Y_{k}" in CANONICAL_COLUMNS: row_dict[f"Y_{k}"] = v
             for k, v in norm_data.items(): 
@@ -236,12 +232,12 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                     prev_year_data = {}
                     
                     if min_y < climate_year: 
-                        prev_year_data = get_climate_data(lat, lon, el, f"Year_{min_y}")
+                        prev_year_data = get_climate_data(lat, lon, el, f"Year_{min_y}.ann")
                         if "error" in prev_year_data and prev_year_data.get("systemic"):
                             alert_placeholder.error(f"🚨 **ClimateNA Download Limit Reached!**\n\nThe server blocked requests during a 3-month lookup.\n\n*Saved {len(records)} successful records.*")
                             break
                         elif "error" in prev_year_data:
-                            continue # skip row
+                            continue 
                     
                     y_t_vals, n_t_vals, y_p_vals, n_p_vals = [], [], [], []
                     
@@ -272,14 +268,22 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
         records.append(row_dict)
         
     progress_bar.progress(1.0)
-    status_text.text("Finished processing pipeline!")
+    
+    if sys_error is None:
+        status_text.text("Finished processing pipeline!")
+        st.sidebar.success(f"Successfully processed {len(records)} records!")
     
     if records:
         final_new_df = pd.DataFrame(records)
         master_df = pd.read_csv(DB_FILE)
         combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
         save_with_ordered_columns(combined_df, DB_FILE)
-        st.sidebar.success(f"Successfully processed and saved {len(records)} records!")
+        
+        if sys_error is not None:
+            st.stop()
+        else:
+            time.sleep(2)
+            st.rerun()
 
 # ==========================================
 #        SIDEBAR: DATA ENTRY
@@ -464,6 +468,7 @@ with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
     if df.empty:
         st.info("Your database is empty. Fetch or add records first.")
         plot_df = pd.DataFrame()
+        use_outlier_filter = False
     else:
         sources = df['Data_Source'].fillna('Unknown').unique().tolist()
         species = df['Species'].dropna().unique().tolist()
@@ -487,6 +492,8 @@ with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
                 use_outlier_filter = st.checkbox(f"Highlight Outliers based on {selected_y}", value=False)
                 if use_outlier_filter:
                     std_devs = st.slider("Flag outside standard deviations:", 1.0, 5.0, 2.5, 0.1)
+        else:
+            use_outlier_filter = False
         
         plot_df['Is_Outlier'] = False
         if use_outlier_filter and len(plot_df.dropna(subset=[selected_y])) > 0:
@@ -496,7 +503,7 @@ with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
             outlier_count = plot_df['Is_Outlier'].sum()
             st.info(f"Identified **{outlier_count}** outliers (outside {mean_y:.1f} ± {std_devs*std_y:.1f}).")
         
-        plot_df['Map_Label'] = plot_df['Species'] + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
+        plot_df['Map_Label'] = plot_df['Species'].fillna('Unknown') + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
 
 # ==========================================
 #        MAIN UI: TABS
