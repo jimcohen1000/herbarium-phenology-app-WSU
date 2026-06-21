@@ -102,9 +102,9 @@ def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
     
-    # Notice varYSM=YSM is removed to enforce ALL variables to return
+    # THE FIX: Added &varYSM=YSM back to the URL to resolve the HTTP 400 Bad Request error
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
-    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}"
+    url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     
     try:
         time.sleep(0.7) # Throttling to prevent IP blocks
@@ -118,6 +118,8 @@ def get_climate_data(lat, lon, el, prd):
                 return {"error": "API returned an HTML block page instead of data.", "systemic": True}
         elif res.status_code in [403, 429]:
             return {"error": f"API Rate Limit Exceeded (HTTP {res.status_code})", "systemic": True}
+        elif res.status_code == 400:
+            return {"error": f"Server Error (HTTP 400) - Bad Request formatting.", "systemic": True}
         else:
             return {"error": f"Server Error (HTTP {res.status_code})", "systemic": True}
     except requests.exceptions.Timeout:
@@ -201,7 +203,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     status_text = st.sidebar.empty()
     alert_placeholder = st.sidebar.empty() 
     
-    # We create a lookup dictionary to make column mapping 100% case-insensitive
+    # Create a lookup dictionary to make column mapping 100% case-insensitive
     canonical_lower_map = {col.lower(): col for col in CANONICAL_COLUMNS}
     
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
@@ -238,7 +240,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             if "error" in year_data or "error" in norm_data:
                 continue 
                 
-            # THE FIX: Case-insensitive extraction captures all monthly and seasonal arrays perfectly
+            # Case-insensitive extraction captures all monthly and seasonal arrays perfectly
             for k, v in year_data.items(): 
                 t_col = f"Y_{str(k).strip()}".lower()
                 if t_col in canonical_lower_map:
