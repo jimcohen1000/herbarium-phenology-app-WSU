@@ -15,20 +15,30 @@ st.set_page_config(page_title="Phenology & Climate Tracker", layout="wide")
 
 DB_FILE = "phenology_dataset.csv"
 
-# The exact variables returned by ClimateNA
-CNA_VARS = [
+# Programmatically generate ALL 265 ClimateNA variables
+CORE_ANNUAL = [
     "MAT","MWMT","MCMT","TD","MAP","MSP","AHM","SHM","DD_0","DD5",
     "DD_18","DD18","NFFD","bFFP","eFFP","FFP","PAS","EMT","EXT","Eref","CMD",
-    "MAR","RH","CMI","DD1040","Tmax_wt","Tmax_sp","Tmax_sm","Tmax_at",
-    "Tmin_wt","Tmin_sp","Tmin_sm","Tmin_at","Tave_wt","Tave_sp","Tave_sm",
-    "Tave_at","PPT_wt","PPT_sp","PPT_sm","PPT_at"
+    "MAR","RH","CMI","DD1040"
+]
+SEAS_MONTHLY = [
+    "Tmax","Tmin","Tave","PPT","Rad","DD_0","DD5","DD_18","DD18","NFFD","PAS","Eref","CMD","RH","CMI"
 ]
 
+CNA_VARS = CORE_ANNUAL.copy()
+for sv in SEAS_MONTHLY:
+    for s in ["wt", "sp", "sm", "at"]:
+        CNA_VARS.append(f"{sv}_{s}")
+for sv in SEAS_MONTHLY:
+    for m in [f"{i:02d}" for i in range(1, 13)]:
+        CNA_VARS.append(f"{sv}{m}")
+
+# Build canonical schema
 CANONICAL_COLUMNS = [
     "Data_Source", "Collector", "Col_Number", "Barcode", "Species", "Year", "DOY", 
     "Latitude", "Longitude", "Elevation", "Phenology_Scored", "Flowering", "Fruiting", 
-    "Vegetative", "URL", "Y_3Mo_prior_Tmean", "N_3Mo_prior_Tmean", "Tmean_Anomaly", 
-    "Y_3Mo_prior_PPT", "N_3Mo_prior_PPT", "PPT_Anomaly"
+    "Vegetative", "URL", "Y_3Mo_prior_mean_Tave", "N_3Mo_prior_mean_Tave", "Tave_Anomaly", 
+    "Y_3Mo_prior_mean_PPT", "N_3Mo_prior_mean_PPT", "PPT_Anomaly"
 ] + [f"Y_{v}" for v in CNA_VARS] + [f"N_{v}" for v in CNA_VARS]
 
 def init_db(filename=DB_FILE):
@@ -184,7 +194,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         progress_bar.progress(count / len(cleaned_df))
         
-        # Initialize dictionary matching canonical schema
         row_dict = {col: row.get(col, np.nan) for col in CANONICAL_COLUMNS if not (col.startswith("Y_") or col.startswith("N_") or col.endswith("_Anomaly"))}
         row_dict['Phenology_Scored'] = False
         
@@ -202,11 +211,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
             climate_year = min(year, 2024) 
             status_text.text(f"Fetching ClimateNA for Year_{climate_year}.ann... ({count+1}/{len(cleaned_df)})")
             
-            # Formatted properly with the individual historical year requirement (.ann)
             year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}.ann")
             norm_data = get_climate_data(lat, lon, el, "Normal_1961_1990")
             
-            # --- API RATE LIMIT DETECTION ---
             sys_error = None
             if "error" in year_data and year_data.get("systemic"): sys_error = year_data["error"]
             elif "error" in norm_data and norm_data.get("systemic"): sys_error = norm_data["error"]
@@ -216,15 +223,14 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                 break 
                 
             if "error" in year_data or "error" in norm_data:
-                continue # Skip out-of-bounds coordinates
+                continue 
                 
-            # Map parameters to dataset
             for k, v in year_data.items(): 
                 if f"Y_{k}" in CANONICAL_COLUMNS: row_dict[f"Y_{k}"] = v
             for k, v in norm_data.items(): 
                 if f"N_{k}" in CANONICAL_COLUMNS: row_dict[f"N_{k}"] = v
             
-            # 3 Month Anomalies Calculation
+            # 3 Month Anomalies Calculation (FIXED: Means calculated for both Temp and Precip)
             if doy is not None:
                 ty, tm = calc_prior_3_months(climate_year, doy)
                 if ty and tm:
@@ -255,15 +261,17 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
                         if y_t_v is not None: y_t_vals.append(y_t_v)
                         if y_p_v is not None: y_p_vals.append(y_p_v)
                     
+                    # Mean calculation for temperature
                     if len(y_t_vals) == 3 and len(n_t_vals) == 3:
-                        row_dict['Y_3Mo_prior_Tmean'] = round(sum(y_t_vals)/3, 2)
-                        row_dict['N_3Mo_prior_Tmean'] = round(sum(n_t_vals)/3, 2)
-                        row_dict['Tmean_Anomaly'] = round(row_dict['Y_3Mo_prior_Tmean'] - row_dict['N_3Mo_prior_Tmean'], 2)
+                        row_dict['Y_3Mo_prior_mean_Tave'] = round(sum(y_t_vals) / 3.0, 2)
+                        row_dict['N_3Mo_prior_mean_Tave'] = round(sum(n_t_vals) / 3.0, 2)
+                        row_dict['Tave_Anomaly'] = round(row_dict['Y_3Mo_prior_mean_Tave'] - row_dict['N_3Mo_prior_mean_Tave'], 2)
                     
+                    # Mean calculation for precipitation (FIXED from Sum)
                     if len(y_p_vals) == 3 and len(n_p_vals) == 3:
-                        row_dict['Y_3Mo_prior_PPT'] = round(sum(y_p_vals), 2)
-                        row_dict['N_3Mo_prior_PPT'] = round(sum(n_p_vals), 2)
-                        row_dict['PPT_Anomaly'] = round(row_dict['Y_3Mo_prior_PPT'] - row_dict['N_3Mo_prior_PPT'], 2)
+                        row_dict['Y_3Mo_prior_mean_PPT'] = round(sum(y_p_vals) / 3.0, 2)
+                        row_dict['N_3Mo_prior_mean_PPT'] = round(sum(n_p_vals) / 3.0, 2)
+                        row_dict['PPT_Anomaly'] = round(row_dict['Y_3Mo_prior_mean_PPT'] - row_dict['N_3Mo_prior_mean_PPT'], 2)
 
         records.append(row_dict)
         
