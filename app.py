@@ -659,8 +659,22 @@ with tab3:
     else:
         valid_plot_df = plot_df.dropna(subset=[selected_x, selected_y]).copy()
         valid_plot_df['Point_Type'] = valid_plot_df['Is_Outlier'].apply(lambda x: 'Outlier' if x else 'Normal')
+        
         if len(valid_plot_df) >= 2:
-            fig = px.scatter(valid_plot_df, x=selected_x, y=selected_y, color='Species' if 'Species' in valid_plot_df.columns else None, symbol='Point_Type', symbol_map={'Normal': 'circle', 'Outlier': 'x'}, hover_data=['Collector', 'Year', 'DOY', 'Data_Source'], template="streamlit")
+            # Dynamically change color based on whether the outlier checkbox is active
+            color_var = 'Point_Type' if use_outlier_filter else ('Species' if 'Species' in valid_plot_df.columns else None)
+            
+            fig = px.scatter(
+                valid_plot_df, 
+                x=selected_x, 
+                y=selected_y, 
+                color=color_var, 
+                symbol='Data_Source', # Assigns different shapes to GBIF vs iNaturalist
+                color_discrete_map={'Normal': '#636EFA', 'Outlier': '#EF553B'}, # Forces outliers to be red when highlighted
+                hover_data=['Species', 'Collector', 'Year', 'DOY', 'Data_Source'], 
+                template="streamlit"
+            )
+            
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
             if len(trend_df) > 1:
                 x_v, y_v = trend_df[selected_x].values, trend_df[selected_y].values
@@ -670,6 +684,7 @@ with tab3:
                     lx = np.array([min(x_v), max(x_v)])
                     fig.add_scatter(x=lx, y=slope * lx + intercept, mode='lines', name='Trend (Normals Only)', line=dict(color='black', dash='dash'))
                     st.success(f"📈 **Trendline (Excluding Outliers):** y = {slope:.3f}x {'+' if intercept>=0 else '-'} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
+            
             fig.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             st.plotly_chart(fig, use_container_width=True)
 
