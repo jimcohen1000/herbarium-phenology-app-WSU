@@ -648,7 +648,28 @@ with tab2:
         if map_df.empty: st.warning("No coordinate data available in the filtered dataset.")
         else:
             map_df['Data_Source'] = map_df['Data_Source'].fillna('Unknown')
-            fig_map = px.scatter_mapbox(map_df, lat="Latitude", lon="Longitude", color="Map_Label", hover_data=["Year", "DOY", "Data_Source", "Collector"], zoom=3, mapbox_style="carto-positron", title="Specimen Collection Sites")
+            
+            # Add a toggle to switch map grouping modes
+            map_color_by = st.radio(
+                "Color Map Points By:", 
+                options=["Data Source (GBIF vs iNaturalist)", "Species & Outliers"],
+                horizontal=True
+            )
+            
+            # Set the Plotly color target based on the radio button choice
+            target_color_col = 'Data_Source' if "Data Source" in map_color_by else 'Map_Label'
+            
+            fig_map = px.scatter_mapbox(
+                map_df, 
+                lat="Latitude", 
+                lon="Longitude", 
+                color=target_color_col, 
+                hover_data=["Year", "DOY", "Data_Source", "Collector", "Species"], 
+                zoom=3, 
+                mapbox_style="carto-positron", 
+                title="Specimen Collection Sites"
+            )
+            
             fig_map.update_traces(marker=dict(size=9, opacity=0.8))
             fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(fig_map, use_container_width=True)
