@@ -212,45 +212,68 @@ def map_api_to_canonical(api_dict, prefix="Y_"):
                 
     return mapped_dict
 
-def thin_and_cap_data(df, target_limit, max_per_year):
+def thin_and_cap_data(df, target_limit, max_per_year, distribute_by_decade=False):
     valid_df = df.dropna(subset=['Latitude', 'Longitude', 'Year', 'DOY', 'URL']).copy()
     valid_df = valid_df[valid_df['URL'].str.strip() != '']
     valid_df = valid_df.sample(frac=1).reset_index(drop=True)
     
-    # Intelligently relax max_per_year if the requested target limit is high and data is sparse
-    current_max = max_per_year
-    capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
-    
-    while len(capped_df) < target_limit and current_max < 50 and len(capped_df) < len(valid_df):
-        current_max += 1
+    if distribute_by_decade:
+        # Group by decade and spread target items utilizing a round-robin approach
+        valid_df['Decade'] = (valid_df['Year'] // 10) * 10
+        
+        # Enforce baseline annual head caps to keep a single outlier year from dominating its decade bin
+        capped_df = valid_df.groupby('Year').head(max_per_year).copy()
+        
+        decade_bins = {d: group.to_dict('records') for d, group in capped_df.groupby('Decade')}
+        decades = sorted(list(decade_bins.keys()))
+        
+        selected_records = []
+        while len(selected_records) < target_limit and any(len(lst) > 0 for lst in decade_bins.values()):
+            for d in decades:
+                if len(selected_records) >= target_limit:
+                    break
+                if len(decade_bins[d]) > 0:
+                    selected_records.append(decade_bins[d].pop(0))
+                    
+        res_df = pd.DataFrame(selected_records)
+        if not res_df.empty and 'Decade' in res_df.columns:
+            res_df = res_df.drop(columns=['Decade'])
+        return res_df
+    else:
+        # Intelligently relax max_per_year if the requested target limit is high and data is sparse
+        current_max = max_per_year
         capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
         
-    unique_years = capped_df['Year'].unique()
-    
-    selected_years, last_y = [], -999
-    for y in unique_years:
-        if y - last_y >= 2: 
-            selected_years.append(y)
-            last_y = y
+        while len(capped_df) < target_limit and current_max < 50 and len(capped_df) < len(valid_df):
+            current_max += 1
+            capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
             
-    spaced_df = capped_df[capped_df['Year'].isin(selected_years)]
-    if len(spaced_df) < target_limit:
-        remaining_df = capped_df[~capped_df['Year'].isin(selected_years)]
-        spaced_df = pd.concat([spaced_df, remaining_df.head(target_limit - len(spaced_df))])
+        unique_years = capped_df['Year'].unique()
         
-    return spaced_df.head(target_limit).sample(frac=1).reset_index(drop=True)
+        selected_years, last_y = [], -999
+        for y in unique_years:
+            if y - last_y >= 2: 
+                selected_years.append(y)
+                last_y = y
+                
+        spaced_df = capped_df[capped_df['Year'].isin(selected_years)]
+        if len(spaced_df) < target_limit:
+            remaining_df = capped_df[~capped_df['Year'].isin(selected_years)]
+            spaced_df = pd.concat([spaced_df, remaining_df.head(target_limit - len(spaced_df))])
+            
+        return spaced_df.head(target_limit).sample(frac=1).reset_index(drop=True)
 
 # ==========================================
 #        THE CORE ENRICHMENT PIPELINE
 # ==========================================
 
-def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3):
+def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by_decade=False):
     if raw_df.empty:
         st.sidebar.warning("No records found (or none passed the filters).")
         return
 
-    st.sidebar.text(f"Applying de-clustering & year distribution...")
-    cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year)
+    st.sidebar.text(f"Applying de-clustering & sample distribution...")
+    cleaned_df = thin_and_cap_data(raw_df, target_limit=target_limit, max_per_year=max_per_year, distribute_by_decade=distribute_by_decade)
     
     if cleaned_df.empty:
         st.sidebar.warning("No valid records remained after filtering.")
@@ -393,10 +416,10 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
                 new_record = [{
                     "Data_Source": "Manual Entry", "Collector": m_col, "Col_Number": m_col_num,
                     "Barcode": m_barcode, "Species": m_spp, "Year": m_yr, "DOY": m_doy,
-                    "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev if m_elev != 0.0 else pd.NA,
+                    "Latitude": m_lat, "Longitude": m_lon, "Elevation": m_elev if m_elev != 0.0 else np.nan,
                     "URL": "Manual", "Flowering": False, "Fruiting": False, "Vegetative": False
                 }]
-                pipeline_enrich_and_save(pd.DataFrame(new_record), target_limit=1, max_per_year=1)
+                pipeline_enrich_and_save(pd.DataFrame(new_record), target_limit=1, max_per_year=1, distribute_by_decade=False)
 
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
@@ -406,6 +429,10 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     col_lim1, col_lim2 = st.columns(2)
     with col_lim1: g_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="g_limit_rec")
     with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="g_max_yr")
+    
+    # Toggle Checkbox for Decade Dist
+    g_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="g_dec_toggle", help="Keeps temporal balance even across decades instead of random selection.")
+    
     g_states = st.text_input("State(s):", help="Comma-separated", key="g_states")
     g_counties = st.text_input("County(s):", help="Comma-separated", key="g_counties")
     col_e1, col_e2 = st.columns(2)
@@ -425,7 +452,6 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
 
             raw_records, offset, end_of_records = [], 0, False
             
-            # Speed fix: Cap the fetcher slightly above limit instead of pulling thousands of rows
             max_to_fetch = max(g_limit * 10, 500)
             while len(raw_records) < max_to_fetch and not end_of_records and offset < 9000:
                 try:
@@ -458,7 +484,7 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                                 "Year": safe_int(y), "DOY": doy, 
                                 "Latitude": obs.get('decimalLatitude'), 
                                 "Longitude": obs.get('decimalLongitude'), 
-                                "Elevation": obs.get('elevation', pd.NA), 
+                                "Elevation": obs.get('elevation', np.nan), 
                                 "URL": rec_url, 
                                 "Flowering": False, "Fruiting": False, "Vegetative": False
                             })
@@ -466,7 +492,7 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
                         offset += 300
                     else: break
                 except: break
-            pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=g_limit, max_per_year=g_max_yr)
+            pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=g_limit, max_per_year=g_max_yr, distribute_by_decade=g_decade)
 
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     inat_spp = st.text_input("Species Name (iNat):", key="i_spp")
@@ -476,6 +502,10 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     col_ilim1, col_ilim2 = st.columns(2)
     with col_ilim1: i_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="i_limit_rec")
     with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="i_max_yr")
+    
+    # Toggle Checkbox for Decade Dist
+    i_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="i_dec_toggle", help="Keeps temporal balance even across decades instead of random selection.")
+    
     i_states = st.text_input("State(s):", key="i_states")
     i_counties = st.text_input("County(s):", key="i_counties")
     col_ie1, col_ie2 = st.columns(2)
@@ -509,7 +539,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                             if obs.get('location') and obs.get('observed_on'):
                                 lat_str, lon_str = obs['location'].split(',')
                                 lat_flt, lon_flt = float(lat_str), float(lon_str)
-                                fetched_elev = pd.NA
+                                fetched_elev = np.nan
                                 if e_min is not None or e_max is not None:
                                     el = get_elevation(lat_flt, lon_flt)
                                     if el is None or (e_min and el < e_min) or (e_max and el > e_max): continue
@@ -522,7 +552,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                 raw_records.append({
                                     "Data_Source": "iNaturalist", 
                                     "Collector": obs.get('user', {}).get('login', ''),
-                                    "Col_Number": pd.NA,
+                                    "Col_Number": np.nan,
                                     "Barcode": obs.get('id', ''),
                                     "Species": obs.get('taxon', {}).get('name', inat_spp), 
                                     "Year": obs_year, "DOY": obs_doy,
@@ -534,7 +564,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                         page += 1
                     else: break
                 except: break
-            pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=i_limit, max_per_year=i_max_yr)
+            pipeline_enrich_and_save(pd.DataFrame(raw_records), target_limit=i_limit, max_per_year=i_max_yr, distribute_by_decade=i_decade)
 
 st.sidebar.write("---")
 if st.sidebar.button("🗑️ Clear Entire Database"):
