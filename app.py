@@ -645,20 +645,30 @@ with tab1:
         st.download_button("📥 Download Full Dataset (CSV)", data=edited_df.to_csv(index=False).encode('utf-8'), file_name="phenology_dataset.csv", mime="text/csv")
 
 with tab2:
-    if plot_df.empty: st.warning("No data to map.")
+    if plot_df.empty: 
+        st.warning("No data to map.")
     else:
         map_df = plot_df.dropna(subset=['Latitude', 'Longitude']).copy()
-        if map_df.empty: st.warning("No coordinate data available in the filtered dataset.")
+        if map_df.empty: 
+            st.warning("No coordinate data available in the filtered dataset.")
         else:
             map_df['Data_Source'] = map_df['Data_Source'].fillna('Unknown')
+            # Create the combined label for the legend
+            map_df['Species_Source'] = map_df['Species'].fillna('Unknown') + ' (' + map_df['Data_Source'] + ')'
             
             map_color_by = st.radio(
                 "Color Map Points By:", 
-                options=["Data Source (GBIF vs iNaturalist)", "Species & Outliers"],
+                options=["Species & Data Source", "Data Source (GBIF vs iNaturalist)", "Species & Outliers"],
                 horizontal=True
             )
             
-            target_color_col = 'Data_Source' if "Data Source" in map_color_by else 'Map_Label'
+            # Determine which column to use for the color mapping
+            if "Species & Data Source" in map_color_by:
+                target_color_col = 'Species_Source'
+            elif "Data Source" in map_color_by:
+                target_color_col = 'Data_Source'
+            else:
+                target_color_col = 'Map_Label'
             
             fig_map = px.scatter_mapbox(
                 map_df, lat="Latitude", lon="Longitude", color=target_color_col, 
