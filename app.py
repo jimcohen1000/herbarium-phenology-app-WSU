@@ -99,6 +99,7 @@ def get_elevation(lat, lon):
     except: return None
     return None
 
+@st.cache_data(show_spinner=False)
 def get_climate_data(lat, lon, el, prd):
     if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
@@ -159,7 +160,6 @@ def normalize_key(k_str):
     return k_str
 
 def get_climate_val(data_dict, prefix, m_str):
-    """Safely extracts seasonal/monthly values using strict PR/Prec formatting explicitly for anomalies"""
     if not data_dict or "error" in data_dict: return None
     
     target_m_padded = m_str.zfill(2)
@@ -183,23 +183,19 @@ def get_climate_val(data_dict, prefix, m_str):
     return None
 
 def map_api_to_canonical(api_dict, prefix="Y_"):
-    """Explicitly maps API payload into Canonical Columns (Handles Monthlies, Seasonals, DDs, and PPTs)"""
     mapped_dict = {}
     canonical_lower = {c.lower(): c for c in CANONICAL_COLUMNS if c.startswith(prefix)}
     
     for k, v in api_dict.items():
         k_str = normalize_key(str(k).strip())
-        
-        # 1. Direct match check (e.g. MAT -> y_mat)
         exact_match = f"{prefix}{k_str}".lower()
         if exact_match in canonical_lower:
             mapped_dict[canonical_lower[exact_match]] = v
             continue
             
-        # 2. Padded vs Unpadded numbers matching (e.g. ppt_01 or ppt1 -> y_ppt01, dd_0_01 -> y_dd_001)
         m = re.match(r"^([a-z0-9_]+?)_?(\d{1,2})$", k_str)
         if m:
-            base_var = m.group(1).rstrip('_') # Strip trailing underscore if it exists
+            base_var = m.group(1).rstrip('_') 
             num = m.group(2).zfill(2)
             
             try1 = f"{prefix}{base_var}{num}".lower()
@@ -218,29 +214,21 @@ def thin_and_cap_data(df, target_limit, max_per_year, distribute_by_decade=False
     valid_df = valid_df.sample(frac=1).reset_index(drop=True)
     
     if distribute_by_decade:
-        # Group by decade and spread target items utilizing a round-robin approach
         valid_df['Decade'] = (valid_df['Year'] // 10) * 10
-        
-        # Enforce baseline annual head caps to keep a single outlier year from dominating its decade bin
         capped_df = valid_df.groupby('Year').head(max_per_year).copy()
-        
         decade_bins = {d: group.to_dict('records') for d, group in capped_df.groupby('Decade')}
         decades = sorted(list(decade_bins.keys()))
         
         selected_records = []
         while len(selected_records) < target_limit and any(len(lst) > 0 for lst in decade_bins.values()):
             for d in decades:
-                if len(selected_records) >= target_limit:
-                    break
-                if len(decade_bins[d]) > 0:
-                    selected_records.append(decade_bins[d].pop(0))
+                if len(selected_records) >= target_limit: break
+                if len(decade_bins[d]) > 0: selected_records.append(decade_bins[d].pop(0))
                     
         res_df = pd.DataFrame(selected_records)
-        if not res_df.empty and 'Decade' in res_df.columns:
-            res_df = res_df.drop(columns=['Decade'])
+        if not res_df.empty and 'Decade' in res_df.columns: res_df = res_df.drop(columns=['Decade'])
         return res_df
     else:
-        # Intelligently relax max_per_year if the requested target limit is high and data is sparse
         current_max = max_per_year
         capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
         
@@ -249,7 +237,6 @@ def thin_and_cap_data(df, target_limit, max_per_year, distribute_by_decade=False
             capped_df = valid_df.groupby('Year').head(current_max).sort_values('Year')
             
         unique_years = capped_df['Year'].unique()
-        
         selected_years, last_y = [], -999
         for y in unique_years:
             if y - last_y >= 2: 
@@ -344,7 +331,6 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
                     
                     for y_t, m_t in zip(ty, tm):
                         m_str = f"{m_t:02d}"
-                        
                         n_t = get_climate_val(norm_data, "tave", m_str)
                         n_p = get_climate_val(norm_data, "ppt", m_str)
                         if n_t is not None: n_t_vals.append(n_t)
@@ -430,9 +416,7 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     with col_lim1: g_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="g_limit_rec")
     with col_lim2: g_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="g_max_yr")
     
-    # Toggle Checkbox for Decade Dist
-    g_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="g_dec_toggle", help="Keeps temporal balance even across decades instead of random selection.")
-    
+    g_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="g_dec_toggle")
     g_states = st.text_input("State(s):", help="Comma-separated", key="g_states")
     g_counties = st.text_input("County(s):", help="Comma-separated", key="g_counties")
     col_e1, col_e2 = st.columns(2)
@@ -451,8 +435,8 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
             if e_min is not None or e_max is not None: base_url += f"&elevation={e_min if e_min else ''},{e_max if e_max else ''}"
 
             raw_records, offset, end_of_records = [], 0, False
-            
             max_to_fetch = max(g_limit * 10, 500)
+            
             while len(raw_records) < max_to_fetch and not end_of_records and offset < 9000:
                 try:
                     res = requests.get(base_url + f"&limit=300&offset={offset}", timeout=10)
@@ -503,9 +487,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     with col_ilim1: i_limit = st.number_input("Total Records:", min_value=5, max_value=200, value=25, step=5, key="i_limit_rec")
     with col_ilim2: i_max_yr = st.number_input("Max per Year:", min_value=1, max_value=20, value=3, key="i_max_yr")
     
-    # Toggle Checkbox for Decade Dist
-    i_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="i_dec_toggle", help="Keeps temporal balance even across decades instead of random selection.")
-    
+    i_decade = st.checkbox("Spread evenly across decades (Round-Robin)", value=False, key="i_dec_toggle")
     i_states = st.text_input("State(s):", key="i_states")
     i_counties = st.text_input("County(s):", key="i_counties")
     col_ie1, col_ie2 = st.columns(2)
@@ -590,10 +572,27 @@ with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
         with c2: sel_spp = st.multiselect("Filter Species:", species, default=species)
         
         plot_df = df[df['Data_Source'].isin(sel_src) & df['Species'].isin(sel_spp)].copy()
+        
+        # Spatial Thinning Subsampler (1 km Grid box balancing)
+        spatial_thin = st.checkbox("🌐 Apply Spatial Thinning (~1 km grid cell grouping)", value=False, help="Subsamples heavily clustered occurrences to only 1 random specimen per ~1 km spatial box per species per year.")
+        if spatial_thin and not plot_df.empty:
+            plot_df['lat_grid'] = np.round(plot_df['Latitude'].astype(float), 2)
+            plot_df['lon_grid'] = np.round(plot_df['Longitude'].astype(float), 2)
+            plot_df = plot_df.drop_duplicates(subset=['Species', 'Year', 'lat_grid', 'lon_grid']).drop(columns=['lat_grid', 'lon_grid'])
+            
         for col in ['Year', 'DOY', 'Latitude', 'Longitude', 'Elevation']:
             if col in plot_df.columns: plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
         for col in [c for c in plot_df.columns if c.startswith('Y_') or c.startswith('N_')]:
             plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce')
+
+        # Programmatic Astronomical Daylength Calculator
+        if not plot_df.empty and 'Latitude' in plot_df.columns and 'DOY' in plot_df.columns:
+            lat_vals = plot_df['Latitude'].fillna(0.0).values
+            doy_vals = plot_df['DOY'].fillna(1).values
+            lat_rad = np.radians(lat_vals)
+            dec_rad = np.radians(23.45 * np.sin(2 * np.pi * (284 + doy_vals) / 365.25))
+            val_clip = np.clip(-np.tan(lat_rad) * np.tan(dec_rad), -1.0, 1.0)
+            plot_df['Photoperiod_Hours'] = np.round((24.0 / np.pi) * np.arccos(val_clip), 2)
 
         num_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
         st.markdown("---")
@@ -617,6 +616,10 @@ with st.expander("⚙️ Global Analysis & Outlier Settings", expanded=True):
             st.info(f"Identified **{outlier_count}** outliers (outside {mean_y:.1f} ± {std_devs*std_y:.1f}).")
         
         plot_df['Map_Label'] = plot_df['Species'].fillna('Unknown') + plot_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
+        
+        # Extractor for the active, heavily filtered dataframe subset
+        st.markdown("---")
+        st.download_button("📥 Download Filtered Subset (CSV)", data=plot_df.to_csv(index=False).encode('utf-8'), file_name="filtered_phenology_subset.csv", mime="text/csv", use_container_width=True)
 
 # ==========================================
 #        MAIN UI: TABS
@@ -649,24 +652,19 @@ with tab2:
         else:
             map_df['Data_Source'] = map_df['Data_Source'].fillna('Unknown')
             
-            # Because MapBox doesn't support changing symbol shapes, we combine Species and Source 
-            # to generate distinct colors for GBIF vs iNat for the same species!
-            map_df['Species_Source'] = map_df['Species'].fillna('Unknown') + " (" + map_df['Data_Source'] + ")"
-            
-            # Keep outlier tag if it exists
-            map_df['Map_Label'] = map_df['Species_Source'] + map_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
-            
-            fig_map = px.scatter_mapbox(
-                map_df, 
-                lat="Latitude", 
-                lon="Longitude", 
-                color="Map_Label", 
-                hover_data=["Year", "DOY", "Data_Source", "Collector", "Species"], 
-                zoom=3, 
-                mapbox_style="carto-positron", 
-                title="Specimen Collection Sites"
+            map_color_by = st.radio(
+                "Color Map Points By:", 
+                options=["Data Source (GBIF vs iNaturalist)", "Species & Outliers"],
+                horizontal=True
             )
             
+            target_color_col = 'Data_Source' if "Data Source" in map_color_by else 'Map_Label'
+            
+            fig_map = px.scatter_mapbox(
+                map_df, lat="Latitude", lon="Longitude", color=target_color_col, 
+                hover_data=["Year", "DOY", "Data_Source", "Collector", "Species"], 
+                zoom=3, mapbox_style="carto-positron", title="Specimen Collection Sites"
+            )
             fig_map.update_traces(marker=dict(size=9, opacity=0.8))
             fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(fig_map, use_container_width=True)
@@ -681,74 +679,51 @@ with tab3:
         if len(valid_plot_df) >= 2:
             st.subheader("📊 Regression & Climate-Phenology Interactions")
             
-            # Checkboxes to let the user control exactly which trendlines to draw
             st.markdown("**Toggle Trendlines (Excludes Outliers):**")
             t_c1, t_c2, t_c3 = st.columns(3)
             with t_c1: show_trend_comb = st.checkbox("Show Combined Trendline", value=True)
             with t_c2: show_trend_gbif = st.checkbox("Show GBIF Trendline", value=False)
             with t_c3: show_trend_inat = st.checkbox("Show iNat Trendline", value=False)
 
-            # Dynamically change point color based on whether the outlier checkbox is active
             color_var = 'Point_Type' if use_outlier_filter else ('Species' if 'Species' in valid_plot_df.columns else None)
             
             fig = px.scatter(
-                valid_plot_df, 
-                x=selected_x, 
-                y=selected_y, 
-                color=color_var, 
-                symbol='Data_Source', # Assigns different shapes to GBIF vs iNaturalist
-                color_discrete_map={'Normal': '#636EFA', 'Outlier': '#EF553B'}, 
+                valid_plot_df, x=selected_x, y=selected_y, color=color_var, 
+                symbol='Data_Source', color_discrete_map={'Normal': '#636EFA', 'Outlier': '#EF553B'}, 
                 hover_data=['Species', 'Collector', 'Year', 'DOY', 'Data_Source'], 
-                template="streamlit",
-                title=f"Scatter Trend: {selected_y} vs {selected_x}"
+                template="streamlit", title=f"Scatter Trend: {selected_y} vs {selected_x}"
             )
             
-            # Filter out outliers before drawing mathematical lines
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
-            
-            # List to hold the output statistics for the table
             regression_stats = []
             
-            # Helper function to calculate stats and plot specific trendlines
             def add_trendline(df_sub, name, color, dash_style):
                 if len(df_sub) > 1:
                     x_v, y_v = df_sub[selected_x].astype(float).values, df_sub[selected_y].astype(float).values
                     if np.var(x_v) > 0 and np.var(y_v) > 0:
-                        
-                        # Use scipy.stats for rigorous p-value and r-value calculations
                         from scipy.stats import linregress
                         slope, intercept, r_value, p_value, std_err = linregress(x_v, y_v)
                         r2 = r_value**2
-                        
                         x_seq = np.array([x_v.min(), x_v.max()])
                         y_seq = slope * x_seq + intercept
                         
                         import plotly.graph_objects as go
                         fig.add_trace(go.Scatter(
-                            x=x_seq, y=y_seq,
-                            mode='lines',
+                            x=x_seq, y=y_seq, mode='lines',
                             name=f'{name} (R²={r2:.2f})',
                             line=dict(color=color, width=3, dash=dash_style)
                         ))
                         
-                        # Format the equation string
                         eq_sign = "+" if intercept >= 0 else "-"
                         equation = f"y = {slope:.4f}x {eq_sign} {abs(intercept):.4f}"
-                        
-                        # Format the p-value cleanly (use scientific notation if extremely small)
                         p_fmt = f"{p_value:.4e}" if p_value < 0.0001 else f"{p_value:.4f}"
                         
-                        # Return the structured data row for the table
                         return {
-                            "Dataset Line": name, 
-                            "Linear Equation": equation, 
-                            "R²": f"{r2:.4f}", 
-                            "p-value": p_fmt, 
-                            "Sample Size (n)": len(df_sub)
+                            "Dataset Line": name, "Linear Equation": equation, 
+                            "R²": f"{r2:.4f}", "p-value": p_fmt, "Sample Size (n)": len(df_sub)
                         }
                 return None
             
-            # Draw the chosen trendlines based on user checkboxes and collect their stats
             if show_trend_comb:
                 stat = add_trendline(trend_df, 'Combined', 'black', 'solid')
                 if stat: regression_stats.append(stat)
@@ -766,13 +741,125 @@ with tab3:
             fig.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             st.plotly_chart(fig, use_container_width=True)
             
-            # Print the stats table if any lines were drawn
             if regression_stats:
                 st.markdown("### 🧮 Regression Statistics")
                 st.table(pd.DataFrame(regression_stats))
             
-            st.markdown("### 📈 Descriptive Parameter Summary")
-            st.dataframe(plot_df[[selected_x, selected_y]].describe().T, use_container_width=True)
+            # --- ADVANCED ECOLOGICAL ANALYTICS PANEL ---
+            st.write("---")
+            st.subheader("🔬 Advanced Ecological Analytics")
+
+            # 1. Historical Epoch Analysis
+            with st.expander("⏳ Climate Sensitivity Over Time (Epoch Analysis)", expanded=False):
+                st.markdown("#### Historical Epoch Split Analysis")
+                st.write("Evaluate shifting adaptive traits or thermal sensitivities by comparing trend lines over custom historical timelines.")
+                epoch_year = st.number_input("Select Epoch Cutoff Year:", min_value=1900, max_value=2026, value=1980, key="epoch_cutoff")
+                
+                df_pre = valid_plot_df[valid_plot_df['Year'] < epoch_year]
+                df_post = valid_plot_df[valid_plot_df['Year'] >= epoch_year]
+                
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    st.markdown(f"**Pre-{epoch_year} Historical Window** (N = {len(df_pre)})")
+                    if len(df_pre) > 1:
+                        ex_v, ey_v = df_pre[selected_x].values, df_pre[selected_y].values
+                        if np.var(ex_v) > 0 and np.var(ey_v) > 0:
+                            eslope, eintercept = np.polyfit(ex_v, ey_v, 1)
+                            er2 = np.corrcoef(ex_v, ey_v)[0, 1]**2
+                            st.metric("Sensitivity Slope", f"{eslope:.3f}")
+                            st.write(f"Equation: `y = {eslope:.3f}x + {eintercept:.1f}`")
+                            st.write(f"R² Fit: `{er2:.3f}`")
+                        else: st.warning("Insufficient variable variance within this sub-epoch window.")
+                    else: st.warning("Not enough matching records to calculate.")
+                    
+                with ec2:
+                    st.markdown(f"**Post-{epoch_year} Modern Window** (N = {len(df_post)})")
+                    if len(df_post) > 1:
+                        ex_v, ey_v = df_post[selected_x].values, df_post[selected_y].values
+                        if np.var(ex_v) > 0 and np.var(ey_v) > 0:
+                            eslope, eintercept = np.polyfit(ex_v, ey_v, 1)
+                            er2 = np.corrcoef(ex_v, ey_v)[0, 1]**2
+                            st.metric("Sensitivity Slope", f"{eslope:.3f}")
+                            st.write(f"Equation: `y = {eslope:.3f}x + {eintercept:.1f}`")
+                            st.write(f"R² Fit: `{er2:.3f}`")
+                        else: st.warning("Insufficient variable variance within this sub-epoch window.")
+                    else: st.warning("Not enough matching records to calculate.")
+
+            # 2. Multivariate Linear Modeling (Matrix-solved OLS)
+            with st.expander("🧮 Multivariate Climate Modeling & Regression", expanded=False):
+                st.markdown("#### Multiple Linear Regression (MLR)")
+                st.write("Analyze structural interactions across multiple predictors simultaneously to explain phenotypic variations.")
+                
+                candidate_predictors = [c for c in num_cols if c != selected_y]
+                defaults = [c for c in ['Y_MAT', 'Y_MAP', 'Tave_Anomaly', 'Year', 'Photoperiod_Hours'] if c in candidate_predictors]
+                selected_predictors = st.multiselect("Select Independent Driver Variables:", options=candidate_predictors, default=defaults, key="mlr_preds")
+                
+                if not selected_predictors:
+                    st.info("Select one or more climatic parameters to isolate effects.")
+                else:
+                    mlr_df = valid_plot_df[[selected_y] + selected_predictors].dropna()
+                    if len(mlr_df) < len(selected_predictors) + 2:
+                        st.warning("Insufficient independent dataset dimensions to resolve linear equations.")
+                    else:
+                        y_mat = mlr_df[selected_y].values
+                        X_mat = mlr_df[selected_predictors].values
+                        X_design = np.hstack([np.ones((X_mat.shape[0], 1)), X_mat])
+                        
+                        try:
+                            # Direct pseudo-inverse OLS solution ensuring matrix safety
+                            beta = np.linalg.pinv(X_design.T @ X_design) @ X_design.T @ y_mat
+                            y_pred = X_design @ beta
+                            ss_res = np.sum((y_mat - y_pred) ** 2)
+                            ss_tot = np.sum((y_mat - np.mean(y_mat)) ** 2)
+                            mlr_r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+                            
+                            st.markdown(f"**Regression Output** (N = {len(mlr_df)}) | **Overall R² Fit Matrix:** `{mlr_r2:.3f}`")
+                            
+                            coeff_df = pd.DataFrame({
+                                "Predictor Node": ["Intercept Coefficient"] + selected_predictors,
+                                "Calculated Effect (Beta Weight)": beta
+                            })
+                            st.dataframe(coeff_df, use_container_width=True, hide_index=True)
+                            
+                            fig_importance = px.bar(
+                                coeff_df[coeff_df['Predictor Node'] != 'Intercept Coefficient'],
+                                x='Predictor Node', y='Calculated Effect (Beta Weight)',
+                                title="Variable Contribution Weights (Direction and Magnitude)",
+                                color='Calculated Effect (Beta Weight)',
+                                color_continuous_scale="RdBu",
+                                color_continuous_midpoint=0.0
+                            )
+                            st.plotly_chart(fig_importance, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"OLS Solver execution error: {e}")
+
+            # 3. Correlation Heatmap Matrix
+            with st.expander("🔥 Correlation Heatmap Matrix", expanded=False):
+                st.markdown("#### Pearson r Interaction Matrix")
+                st.write("Isolate parameters with heavy structural collinearity to choose the best independent features.")
+                
+                heatmap_candidates = [selected_y, 'Year', 'Latitude', 'Elevation', 'Tave_Anomaly', 'PPT_Anomaly', 'Y_MAT', 'Y_MAP', 'Photoperiod_Hours']
+                default_hm = [v for v in heatmap_candidates if v in num_cols or v == 'Photoperiod_Hours']
+                
+                heatmap_vars = st.multiselect(
+                    "Select Heatmap Targets:",
+                    options=num_cols,
+                    default=default_hm,
+                    key="hm_vars"
+                )
+                
+                if len(heatmap_vars) < 2:
+                    st.info("Requires at least two intersecting parameters to chart matrix boundaries.")
+                else:
+                    corr_matrix = plot_df[heatmap_vars].corr(method='pearson')
+                    fig_hm = px.imshow(
+                        corr_matrix,
+                        text_auto=".2f",
+                        color_continuous_scale="RdBu_r",
+                        zmin=-1.0, zmax=1.0,
+                        title="Variable Cross-Correlation Matrix"
+                    )
+                    st.plotly_chart(fig_hm, use_container_width=True)
 
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
