@@ -706,13 +706,20 @@ with tab3:
             # Filter out outliers before drawing mathematical lines
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
             
-            # Helper function to calculate and plot specific trendlines
+            # List to hold the output statistics for the table
+            regression_stats = []
+            
+            # Helper function to calculate stats and plot specific trendlines
             def add_trendline(df_sub, name, color, dash_style):
                 if len(df_sub) > 1:
                     x_v, y_v = df_sub[selected_x].astype(float).values, df_sub[selected_y].astype(float).values
                     if np.var(x_v) > 0 and np.var(y_v) > 0:
-                        slope, intercept = np.polyfit(x_v, y_v, 1)
-                        r2 = np.corrcoef(x_v, y_v)[0, 1]**2
+                        
+                        # Use scipy.stats for rigorous p-value and r-value calculations
+                        from scipy.stats import linregress
+                        slope, intercept, r_value, p_value, std_err = linregress(x_v, y_v)
+                        r2 = r_value**2
+                        
                         x_seq = np.array([x_v.min(), x_v.max()])
                         y_seq = slope * x_seq + intercept
                         
@@ -720,24 +727,49 @@ with tab3:
                         fig.add_trace(go.Scatter(
                             x=x_seq, y=y_seq,
                             mode='lines',
-                            name=f'{name} (m={slope:.3f}, R²={r2:.2f})',
+                            name=f'{name} (R²={r2:.2f})',
                             line=dict(color=color, width=3, dash=dash_style)
                         ))
+                        
+                        # Format the equation string
+                        eq_sign = "+" if intercept >= 0 else "-"
+                        equation = f"y = {slope:.4f}x {eq_sign} {abs(intercept):.4f}"
+                        
+                        # Format the p-value cleanly (use scientific notation if extremely small)
+                        p_fmt = f"{p_value:.4e}" if p_value < 0.0001 else f"{p_value:.4f}"
+                        
+                        # Return the structured data row for the table
+                        return {
+                            "Dataset Line": name, 
+                            "Linear Equation": equation, 
+                            "R²": f"{r2:.4f}", 
+                            "p-value": p_fmt, 
+                            "Sample Size (n)": len(df_sub)
+                        }
+                return None
             
-            # Draw the chosen trendlines based on user checkboxes
+            # Draw the chosen trendlines based on user checkboxes and collect their stats
             if show_trend_comb:
-                add_trendline(trend_df, 'Combined', 'black', 'solid')
+                stat = add_trendline(trend_df, 'Combined', 'black', 'solid')
+                if stat: regression_stats.append(stat)
                 
             if show_trend_gbif:
                 gbif_df = trend_df[trend_df['Data_Source'].astype(str).str.contains('GBIF', case=False, na=False)]
-                add_trendline(gbif_df, 'GBIF Only', 'royalblue', 'dash')
+                stat = add_trendline(gbif_df, 'GBIF Only', 'royalblue', 'dash')
+                if stat: regression_stats.append(stat)
                 
             if show_trend_inat:
                 inat_df = trend_df[trend_df['Data_Source'].astype(str).str.contains('iNaturalist', case=False, na=False)]
-                add_trendline(inat_df, 'iNat Only', 'forestgreen', 'dot')
+                stat = add_trendline(inat_df, 'iNat Only', 'forestgreen', 'dot')
+                if stat: regression_stats.append(stat)
 
             fig.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Print the stats table if any lines were drawn
+            if regression_stats:
+                st.markdown("### 🧮 Regression Statistics")
+                st.table(pd.DataFrame(regression_stats))
             
             st.markdown("### 📈 Descriptive Parameter Summary")
             st.dataframe(plot_df[[selected_x, selected_y]].describe().T, use_container_width=True)
