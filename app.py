@@ -649,21 +649,18 @@ with tab2:
         else:
             map_df['Data_Source'] = map_df['Data_Source'].fillna('Unknown')
             
-            # Add a toggle to switch map grouping modes
-            map_color_by = st.radio(
-                "Color Map Points By:", 
-                options=["Data Source (GBIF vs iNaturalist)", "Species & Outliers"],
-                horizontal=True
-            )
+            # Because MapBox doesn't support changing symbol shapes, we combine Species and Source 
+            # to generate distinct colors for GBIF vs iNat for the same species!
+            map_df['Species_Source'] = map_df['Species'].fillna('Unknown') + " (" + map_df['Data_Source'] + ")"
             
-            # Set the Plotly color target based on the radio button choice
-            target_color_col = 'Data_Source' if "Data Source" in map_color_by else 'Map_Label'
+            # Keep outlier tag if it exists
+            map_df['Map_Label'] = map_df['Species_Source'] + map_df['Is_Outlier'].apply(lambda x: ' 🔴 [OUTLIER]' if x else '')
             
             fig_map = px.scatter_mapbox(
                 map_df, 
                 lat="Latitude", 
                 lon="Longitude", 
-                color=target_color_col, 
+                color="Map_Label", 
                 hover_data=["Year", "DOY", "Data_Source", "Collector", "Species"], 
                 zoom=3, 
                 mapbox_style="carto-positron", 
@@ -682,7 +679,16 @@ with tab3:
         valid_plot_df['Point_Type'] = valid_plot_df['Is_Outlier'].apply(lambda x: 'Outlier' if x else 'Normal')
         
         if len(valid_plot_df) >= 2:
-            # Dynamically change color based on whether the outlier checkbox is active
+            st.subheader("📊 Regression & Climate-Phenology Interactions")
+            
+            # Checkboxes to let the user control exactly which trendlines to draw
+            st.markdown("**Toggle Trendlines (Excludes Outliers):**")
+            t_c1, t_c2, t_c3 = st.columns(3)
+            with t_c1: show_trend_comb = st.checkbox("Show Combined Trendline", value=True)
+            with t_c2: show_trend_gbif = st.checkbox("Show GBIF Trendline", value=False)
+            with t_c3: show_trend_inat = st.checkbox("Show iNat Trendline", value=False)
+
+            # Dynamically change point color based on whether the outlier checkbox is active
             color_var = 'Point_Type' if use_outlier_filter else ('Species' if 'Species' in valid_plot_df.columns else None)
             
             fig = px.scatter(
@@ -691,23 +697,50 @@ with tab3:
                 y=selected_y, 
                 color=color_var, 
                 symbol='Data_Source', # Assigns different shapes to GBIF vs iNaturalist
-                color_discrete_map={'Normal': '#636EFA', 'Outlier': '#EF553B'}, # Forces outliers to be red when highlighted
+                color_discrete_map={'Normal': '#636EFA', 'Outlier': '#EF553B'}, 
                 hover_data=['Species', 'Collector', 'Year', 'DOY', 'Data_Source'], 
-                template="streamlit"
+                template="streamlit",
+                title=f"Scatter Trend: {selected_y} vs {selected_x}"
             )
             
+            # Filter out outliers before drawing mathematical lines
             trend_df = valid_plot_df[valid_plot_df['Is_Outlier'] == False]
-            if len(trend_df) > 1:
-                x_v, y_v = trend_df[selected_x].values, trend_df[selected_y].values
-                if np.var(x_v) > 0 and np.var(y_v) > 0:
-                    slope, intercept = np.polyfit(x_v, y_v, 1)
-                    r2 = np.corrcoef(x_v, y_v)[0, 1]**2
-                    lx = np.array([min(x_v), max(x_v)])
-                    fig.add_scatter(x=lx, y=slope * lx + intercept, mode='lines', name='Trend (Normals Only)', line=dict(color='black', dash='dash'))
-                    st.success(f"📈 **Trendline (Excluding Outliers):** y = {slope:.3f}x {'+' if intercept>=0 else '-'} {abs(intercept):.3f}  |  **R²:** {r2:.3f}")
             
+            # Helper function to calculate and plot specific trendlines
+            def add_trendline(df_sub, name, color, dash_style):
+                if len(df_sub) > 1:
+                    x_v, y_v = df_sub[selected_x].astype(float).values, df_sub[selected_y].astype(float).values
+                    if np.var(x_v) > 0 and np.var(y_v) > 0:
+                        slope, intercept = np.polyfit(x_v, y_v, 1)
+                        r2 = np.corrcoef(x_v, y_v)[0, 1]**2
+                        x_seq = np.array([x_v.min(), x_v.max()])
+                        y_seq = slope * x_seq + intercept
+                        
+                        import plotly.graph_objects as go
+                        fig.add_trace(go.Scatter(
+                            x=x_seq, y=y_seq,
+                            mode='lines',
+                            name=f'{name} (m={slope:.3f}, R²={r2:.2f})',
+                            line=dict(color=color, width=3, dash=dash_style)
+                        ))
+            
+            # Draw the chosen trendlines based on user checkboxes
+            if show_trend_comb:
+                add_trendline(trend_df, 'Combined', 'black', 'solid')
+                
+            if show_trend_gbif:
+                gbif_df = trend_df[trend_df['Data_Source'].astype(str).str.contains('GBIF', case=False, na=False)]
+                add_trendline(gbif_df, 'GBIF Only', 'royalblue', 'dash')
+                
+            if show_trend_inat:
+                inat_df = trend_df[trend_df['Data_Source'].astype(str).str.contains('iNaturalist', case=False, na=False)]
+                add_trendline(inat_df, 'iNat Only', 'forestgreen', 'dot')
+
             fig.update_traces(marker=dict(size=10, opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
             st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("### 📈 Descriptive Parameter Summary")
+            st.dataframe(plot_df[[selected_x, selected_y]].describe().T, use_container_width=True)
 
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
