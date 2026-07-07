@@ -1,5 +1,8 @@
 streamlit
 pandas
+numpy
 requests
 plotly
+scipy
+scikit-learn
 statsmodels
