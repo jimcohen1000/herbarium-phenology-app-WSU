@@ -972,7 +972,8 @@ with tab5:
             
             ml_features = st.multiselect("Select Predictor Features (X):", ml_candidates, default=default_ml_feats)
             
-            if st.button("🚀 Train Random Forest Model", type="primary"):
+            # Swapped button for a checkbox so the interactive predictor stays alive when we adjust sliders
+            if st.checkbox("🚀 Enable & Train Random Forest Model", value=False):
                 if not ml_features:
                     st.warning("Please select at least one predictor feature.")
                 else:
@@ -985,20 +986,67 @@ with tab5:
                             X = ml_df[ml_features]
                             y = ml_df[ml_target]
                             
+                            # Train the model
                             rf = RandomForestRegressor(n_estimators=100, random_state=42)
                             rf.fit(X, y)
                             score = rf.score(X, y)
                             
                             st.success(f"**Model trained successfully on {len(ml_df)} samples!** |  Overall Predictive R²: `{score:.3f}`")
                             
-                            importances = rf.feature_importances_
-                            imp_df = pd.DataFrame({"Feature": ml_features, "Importance Weight": importances}).sort_values('Importance Weight', ascending=True)
-                            
-                            fig_rf = px.bar(imp_df, x='Importance Weight', y='Feature', orientation='h', 
-                                            title="Random Forest Feature Importance (Non-Linear Impact)",
-                                            color='Importance Weight', color_continuous_scale="Viridis")
-                            st.plotly_chart(fig_rf, use_container_width=True)
+                            # -- ROW 1: Diagnostics & Importance --
+                            c_rf1, c_rf2 = st.columns(2)
+                            with c_rf1:
+                                importances = rf.feature_importances_
+                                imp_df = pd.DataFrame({"Feature": ml_features, "Importance Weight": importances}).sort_values('Importance Weight', ascending=True)
+                                
+                                fig_rf = px.bar(imp_df, x='Importance Weight', y='Feature', orientation='h', 
+                                                title="Random Forest Feature Importance",
+                                                color='Importance Weight', color_continuous_scale="Viridis")
+                                fig_rf.update_layout(margin=dict(l=0, r=0, t=40, b=0))
+                                st.plotly_chart(fig_rf, use_container_width=True)
+                                
+                            with c_rf2:
+                                y_pred_all = rf.predict(X)
+                                pred_diag_df = pd.DataFrame({"Actual": y, "Predicted": y_pred_all})
+                                fig_pred = px.scatter(pred_diag_df, x="Actual", y="Predicted", opacity=0.6, 
+                                                      title="Model Fit: Actual vs. Predicted")
+                                # Add perfect 1:1 prediction line
+                                fig_pred.add_shape(type="line", line=dict(dash='dash', color='red', width=2),
+                                                   x0=y.min(), y0=y.min(), x1=y.max(), y1=y.max())
+                                fig_pred.update_layout(margin=dict(l=0, r=0, t=40, b=0))
+                                st.plotly_chart(fig_pred, use_container_width=True)
 
+                            # -- ROW 2: Interactive What-If Predictor --
+                            st.write("---")
+                            st.markdown("### 🔮 Interactive 'What-If' Predictor")
+                            st.write("Adjust the environmental or temporal variables below. The model will calculate a real-time prediction for your target variable based on the patterns it learned.")
+                            
+                            pred_cols = st.columns(min(len(ml_features), 4))
+                            user_inputs = {}
+                            
+                            # Generate dynamic inputs for whatever features the user selected
+                            for idx, feat in enumerate(ml_features):
+                                col_idx = idx % min(len(ml_features), 4)
+                                with pred_cols[col_idx]:
+                                    f_min = float(X[feat].min())
+                                    f_max = float(X[feat].max())
+                                    f_mean = float(X[feat].mean())
+                                    
+                                    # Create a safe slider/number input range
+                                    buffer = (f_max - f_min) * 0.1 if f_max != f_min else 1.0
+                                    user_inputs[feat] = st.number_input(
+                                        f"{feat}:", 
+                                        min_value=f_min - buffer, 
+                                        max_value=f_max + buffer, 
+                                        value=f_mean, 
+                                        format="%.2f"
+                                    )
+                            
+                            # Predict based on user inputs
+                            input_df = pd.DataFrame([user_inputs])
+                            live_prediction = rf.predict(input_df)[0]
+                            
+                            st.success(f"🎯 **Predicted {ml_target}:** `{live_prediction:.2f}`")
 with tab6:
     st.markdown("### 🗄️ Comprehensive Database Master Ledger")
     st.info("⚠️ This dashboard exposes the raw, unfiltered master database. You are free to view, append, modify, or delete any record across the entire study project directly inside this workspace.")
