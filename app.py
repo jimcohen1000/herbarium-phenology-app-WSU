@@ -864,7 +864,7 @@ with tab3:
                     fig_hm = px.imshow(corr_matrix, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1.0, zmax=1.0, title="Variable Cross-Correlation Matrix")
                     st.plotly_chart(fig_hm, use_container_width=True)
             
-            # 4. Generate Export Scripts (Restored)
+            # 4. Generate Export Scripts 
             with st.expander("💾 Generate Export Scripts (R / Python)", expanded=False):
                 st.markdown("#### Reproduce your Scatter Plots Locally")
                 st.write("Copy and paste these scripts into your local IDE. Ensure you have downloaded the **Filtered Subset (CSV)** from the sidebar and saved it in your working directory.")
@@ -956,23 +956,27 @@ with tab4:
             st.rerun()
 
 with tab5:
-    st.subheader("🌲 Machine Learning: Random Forest Predictor")
-    st.write("Train an isolated Random Forest Regressor to identify non-linear relationships and rank the most critical independent predictors for your target variable. This runs entirely in the browser and does not affect your global settings.")
+    st.subheader("🌲 Machine Learning: DOY Predictive Modeler")
+    st.write("Train a Random Forest to identify non-linear relationships. It supports BOTH numeric climate drivers and categorical data (like Species and Data Source).")
     
     if plot_df.empty:
         st.warning("No data available to train a model.")
     else:
+        # Step 1: Identify Valid Feature Candidates (Now includes Categories!)
         num_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
+        cat_cols = [c for c in ['Species', 'Data_Source'] if c in plot_df.columns]
+        
         if len(num_cols) < 2:
             st.warning("Not enough numeric columns for machine learning.")
         else:
             ml_target = st.selectbox("Select Target Variable (y):", num_cols, index=num_cols.index('DOY') if 'DOY' in num_cols else 0)
-            ml_candidates = [c for c in num_cols if c != ml_target]
-            default_ml_feats = [c for c in ['Year', 'Latitude', 'Elevation', 'Y_MAT', 'Y_MAP', 'Photoperiod_Hours'] if c in ml_candidates]
+            
+            ml_candidates = [c for c in num_cols if c != ml_target] + cat_cols
+            default_ml_feats = [c for c in ['Species', 'Data_Source', 'Year', 'Latitude', 'Elevation', 'Y_MAT', 'Photoperiod_Hours'] if c in ml_candidates]
             
             ml_features = st.multiselect("Select Predictor Features (X):", ml_candidates, default=default_ml_feats)
             
-            # Swapped button for a checkbox so the interactive predictor stays alive when we adjust sliders
+            # Use a checkbox so the model stays 'alive' for interactive slider testing
             if st.checkbox("🚀 Enable & Train Random Forest Model", value=False):
                 if not ml_features:
                     st.warning("Please select at least one predictor feature.")
@@ -981,72 +985,101 @@ with tab5:
                     if len(ml_df) < 10:
                         st.error("Not enough valid data points to train a reliable model. You need at least 10 complete rows.")
                     else:
-                        with st.spinner("Training Model..."):
+                        with st.spinner("One-Hot Encoding Categoricals & Training Model..."):
                             from sklearn.ensemble import RandomForestRegressor
-                            X = ml_df[ml_features]
+                            
+                            X_raw = ml_df[ml_features]
                             y = ml_df[ml_target]
                             
-                            # Train the model
+                            # One-Hot Encode the string categories for the RF Model
+                            X_encoded = pd.get_dummies(X_raw, drop_first=False)
+                            
                             rf = RandomForestRegressor(n_estimators=100, random_state=42)
-                            rf.fit(X, y)
-                            score = rf.score(X, y)
+                            rf.fit(X_encoded, y)
+                            score = rf.score(X_encoded, y)
                             
                             st.success(f"**Model trained successfully on {len(ml_df)} samples!** |  Overall Predictive R²: `{score:.3f}`")
                             
-                            # -- ROW 1: Diagnostics & Importance --
-                            c_rf1, c_rf2 = st.columns(2)
-                            with c_rf1:
-                                importances = rf.feature_importances_
-                                imp_df = pd.DataFrame({"Feature": ml_features, "Importance Weight": importances}).sort_values('Importance Weight', ascending=True)
-                                
-                                fig_rf = px.bar(imp_df, x='Importance Weight', y='Feature', orientation='h', 
-                                                title="Random Forest Feature Importance",
-                                                color='Importance Weight', color_continuous_scale="Viridis")
-                                fig_rf.update_layout(margin=dict(l=0, r=0, t=40, b=0))
-                                st.plotly_chart(fig_rf, use_container_width=True)
-                                
-                            with c_rf2:
-                                y_pred_all = rf.predict(X)
-                                pred_diag_df = pd.DataFrame({"Actual": y, "Predicted": y_pred_all})
-                                fig_pred = px.scatter(pred_diag_df, x="Actual", y="Predicted", opacity=0.6, 
-                                                      title="Model Fit: Actual vs. Predicted")
-                                # Add perfect 1:1 prediction line
-                                fig_pred.add_shape(type="line", line=dict(dash='dash', color='red', width=2),
-                                                   x0=y.min(), y0=y.min(), x1=y.max(), y1=y.max())
-                                fig_pred.update_layout(margin=dict(l=0, r=0, t=40, b=0))
-                                st.plotly_chart(fig_pred, use_container_width=True)
-
-                            # -- ROW 2: Interactive What-If Predictor --
+                            # ---- ROW 1: FEATURE IMPORTANCE ----
+                            importances = rf.feature_importances_
+                            # Take top 15 so dummy columns don't crowd the chart
+                            imp_df = pd.DataFrame({"Feature": X_encoded.columns, "Importance Weight": importances}).sort_values('Importance Weight', ascending=True).tail(15)
+                            
+                            fig_rf = px.bar(imp_df, x='Importance Weight', y='Feature', orientation='h', 
+                                            title="Top 15 Feature Importances (Non-Linear Impact)",
+                                            color='Importance Weight', color_continuous_scale="Viridis")
+                            st.plotly_chart(fig_rf, use_container_width=True)
+                            
+                            # ---- ROW 2: SENSITIVITY SIMULATOR (Partial Dependence via SD) ----
                             st.write("---")
-                            st.markdown("### 🔮 Interactive 'What-If' Predictor")
-                            st.write("Adjust the environmental or temporal variables below. The model will calculate a real-time prediction for your target variable based on the patterns it learned.")
+                            st.markdown("### 🔮 DOY Sensitivity & Distribution Simulator")
+                            st.write(f"Calculate how the predicted `{ml_target}` changes when a specific environmental variable naturally fluctuates **between its Mean ± 1 Standard Deviation**, while holding all other parameters constant.")
                             
-                            pred_cols = st.columns(min(len(ml_features), 4))
-                            user_inputs = {}
+                            numeric_features = [f for f in ml_features if f not in cat_cols]
                             
-                            # Generate dynamic inputs for whatever features the user selected
-                            for idx, feat in enumerate(ml_features):
-                                col_idx = idx % min(len(ml_features), 4)
-                                with pred_cols[col_idx]:
-                                    f_min = float(X[feat].min())
-                                    f_max = float(X[feat].max())
-                                    f_mean = float(X[feat].mean())
+                            if not numeric_features:
+                                st.info("Select at least one continuous numeric feature to run the sensitivity distribution.")
+                            else:
+                                sim_c1, sim_c2, sim_c3 = st.columns(3)
+                                
+                                base_profile = {}
+                                # 1. Allow selection of the specific base profile
+                                if 'Species' in ml_features:
+                                    with sim_c1:
+                                        base_profile['Species'] = st.selectbox("Simulate for Species:", ml_df['Species'].unique())
+                                if 'Data_Source' in ml_features:
+                                    with sim_c2:
+                                        base_profile['Data_Source'] = st.selectbox("Simulate for Data Source:", ml_df['Data_Source'].unique())
+                                        
+                                # 2. Allow selection of variable to perturb
+                                with sim_c3:
+                                    target_sim_var = st.selectbox("Variable to Fluctuate (± 1 SD):", numeric_features)
+                                
+                                if target_sim_var:
+                                    mu = X_raw[target_sim_var].mean()
+                                    sigma = X_raw[target_sim_var].std()
                                     
-                                    # Create a safe slider/number input range
-                                    buffer = (f_max - f_min) * 0.1 if f_max != f_min else 1.0
-                                    user_inputs[feat] = st.number_input(
-                                        f"{feat}:", 
-                                        min_value=f_min - buffer, 
-                                        max_value=f_max + buffer, 
-                                        value=f_mean, 
-                                        format="%.2f"
+                                    # Create the distribution (100 points) between Mean - 1 SD and Mean + 1 SD
+                                    sim_values = np.linspace(mu - sigma, mu + sigma, 100)
+                                    sim_df = pd.DataFrame({target_sim_var: sim_values})
+                                    
+                                    # Hold all other continuous variables at their exact mean
+                                    for f in numeric_features:
+                                        if f != target_sim_var:
+                                            sim_df[f] = X_raw[f].mean()
+                                            
+                                    # Hold categorical base profile
+                                    for cat_feat in cat_cols:
+                                        if cat_feat in ml_features:
+                                            sim_df[cat_feat] = base_profile[cat_feat]
+                                            
+                                    # Encode identically to training data
+                                    sim_encoded = pd.get_dummies(sim_df)
+                                    sim_encoded = sim_encoded.reindex(columns=X_encoded.columns, fill_value=0)
+                                    
+                                    # Run the predictions for all 100 points
+                                    sim_preds = rf.predict(sim_encoded)
+                                    
+                                    min_pred, max_pred = sim_preds.min(), sim_preds.max()
+                                    shift_days = max_pred - min_pred
+                                    
+                                    # Plot the sensitivity distribution curve
+                                    plot_sim_df = pd.DataFrame({target_sim_var: sim_values, "Predicted DOY": sim_preds})
+                                    fig_sim = px.line(
+                                        plot_sim_df, x=target_sim_var, y="Predicted DOY", 
+                                        title=f"Predicted Shift in {ml_target} across 1 SD of {target_sim_var}",
+                                        labels={target_sim_var: f"{target_sim_var} (Mean: {mu:.2f} ± {sigma:.2f})"}
                                     )
-                            
-                            # Predict based on user inputs
-                            input_df = pd.DataFrame([user_inputs])
-                            live_prediction = rf.predict(input_df)[0]
-                            
-                            st.success(f"🎯 **Predicted {ml_target}:** `{live_prediction:.2f}`")
+                                    
+                                    # Draw the Mean and SD boundary lines
+                                    fig_sim.add_vline(x=mu, line_dash="dash", line_color="black", annotation_text="Mean")
+                                    fig_sim.add_vline(x=mu - sigma, line_dash="dot", line_color="gray", annotation_text="-1 SD")
+                                    fig_sim.add_vline(x=mu + sigma, line_dash="dot", line_color="gray", annotation_text="+1 SD")
+                                    
+                                    st.plotly_chart(fig_sim, use_container_width=True)
+                                    
+                                    st.success(f"**Insight:** For **{base_profile.get('Species', 'All Species')}** ({base_profile.get('Data_Source', 'Combined')}), as `{target_sim_var}` naturally fluctuates within 1 Standard Deviation, the model predicts the {ml_target} shifts by **{shift_days:.1f} units** (from {min_pred:.1f} to {max_pred:.1f}).")
+
 with tab6:
     st.markdown("### 🗄️ Comprehensive Database Master Ledger")
     st.info("⚠️ This dashboard exposes the raw, unfiltered master database. You are free to view, append, modify, or delete any record across the entire study project directly inside this workspace.")
