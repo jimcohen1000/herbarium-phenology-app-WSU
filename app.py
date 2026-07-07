@@ -962,7 +962,6 @@ with tab5:
     if plot_df.empty:
         st.warning("No data available to train a model.")
     else:
-        # Step 1: Identify Valid Feature Candidates (Now includes Categories!)
         num_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
         cat_cols = [c for c in ['Species', 'Data_Source'] if c in plot_df.columns]
         
@@ -976,7 +975,6 @@ with tab5:
             
             ml_features = st.multiselect("Select Predictor Features (X):", ml_candidates, default=default_ml_feats)
             
-            # Use a checkbox so the model stays 'alive' for interactive slider testing
             if st.checkbox("🚀 Enable & Train Random Forest Model", value=False):
                 if not ml_features:
                     st.warning("Please select at least one predictor feature.")
@@ -987,11 +985,11 @@ with tab5:
                     else:
                         with st.spinner("One-Hot Encoding Categoricals & Training Model..."):
                             from sklearn.ensemble import RandomForestRegressor
+                            import numpy as np
                             
                             X_raw = ml_df[ml_features]
                             y = ml_df[ml_target]
                             
-                            # One-Hot Encode the string categories for the RF Model
                             X_encoded = pd.get_dummies(X_raw, drop_first=False)
                             
                             rf = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -1000,9 +998,7 @@ with tab5:
                             
                             st.success(f"**Model trained successfully on {len(ml_df)} samples!** |  Overall Predictive R²: `{score:.3f}`")
                             
-                            # ---- ROW 1: FEATURE IMPORTANCE ----
                             importances = rf.feature_importances_
-                            # Take top 15 so dummy columns don't crowd the chart
                             imp_df = pd.DataFrame({"Feature": X_encoded.columns, "Importance Weight": importances}).sort_values('Importance Weight', ascending=True).tail(15)
                             
                             fig_rf = px.bar(imp_df, x='Importance Weight', y='Feature', orientation='h', 
@@ -1010,7 +1006,6 @@ with tab5:
                                             color='Importance Weight', color_continuous_scale="Viridis")
                             st.plotly_chart(fig_rf, use_container_width=True)
                             
-                            # ---- ROW 2: SENSITIVITY SIMULATOR (Partial Dependence via SD) ----
                             st.write("---")
                             st.markdown("### 🔮 DOY Sensitivity & Distribution Simulator")
                             st.write(f"Calculate how the predicted `{ml_target}` changes when a specific environmental variable naturally fluctuates **between its Mean ± 1 Standard Deviation**, while holding all other parameters constant.")
@@ -1023,63 +1018,86 @@ with tab5:
                                 sim_c1, sim_c2, sim_c3 = st.columns(3)
                                 
                                 base_profile = {}
-                                # 1. Allow selection of the specific base profile
                                 if 'Species' in ml_features:
                                     with sim_c1:
                                         base_profile['Species'] = st.selectbox("Simulate for Species:", ml_df['Species'].unique())
                                 if 'Data_Source' in ml_features:
                                     with sim_c2:
-                                        base_profile['Data_Source'] = st.selectbox("Simulate for Data Source:", ml_df['Data_Source'].unique())
+                                        # UPDATED: Hardcoded options for GBIF, iNaturalist, or Both
+                                        base_profile['Data_Source'] = st.selectbox(
+                                            "Simulate for Data Source:", 
+                                            options=["GBIF Herbarium", "iNaturalist", "Both"]
+                                        )
                                         
-                                # 2. Allow selection of variable to perturb
                                 with sim_c3:
                                     target_sim_var = st.selectbox("Variable to Fluctuate (± 1 SD):", numeric_features)
                                 
                                 if target_sim_var:
+                                    # Calculate baseline stats
                                     mu = X_raw[target_sim_var].mean()
                                     sigma = X_raw[target_sim_var].std()
                                     
-                                    # Create the distribution (100 points) between Mean - 1 SD and Mean + 1 SD
+                                    # UPDATED: Display Mean and 1 SD values explicitly
+                                    st.markdown(f"**📊 Statistical Baseline Profiles for `{target_sim_var}`:**")
+                                    m_col1, m_col2, m_col3 = st.columns(3)
+                                    with m_col1: st.metric("Dataset Mean", f"{mu:.2f}")
+                                    with m_col2: st.metric("1 Standard Deviation (SD)", f"{sigma:.2f}")
+                                    with m_col3: st.metric("Fluctuation Span (±1 SD)", f"{mu - sigma:.2f} to {mu + sigma:.2f}")
+                                    
+                                    # Generate the 100 step distribution array
                                     sim_values = np.linspace(mu - sigma, mu + sigma, 100)
                                     sim_df = pd.DataFrame({target_sim_var: sim_values})
                                     
-                                    # Hold all other continuous variables at their exact mean
+                                    # Hold all other numerical variables at their mean
                                     for f in numeric_features:
                                         if f != target_sim_var:
                                             sim_df[f] = X_raw[f].mean()
                                             
-                                    # Hold categorical base profile
-                                    for cat_feat in cat_cols:
-                                        if cat_feat in ml_features:
-                                            sim_df[cat_feat] = base_profile[cat_feat]
+                                    if 'Species' in ml_features:
+                                        sim_df['Species'] = base_profile['Species']
+                                        
+                                    # UPDATED: Handle "Both" by blending predictions
+                                    if 'Data_Source' in ml_features:
+                                        if base_profile['Data_Source'] == "Both":
+                                            # Generate predictions for GBIF
+                                            sim_df_gbif = sim_df.copy()
+                                            sim_df_gbif['Data_Source'] = "GBIF Herbarium"
+                                            sim_encoded_gbif = pd.get_dummies(sim_df_gbif).reindex(columns=X_encoded.columns, fill_value=0)
+                                            preds_gbif = rf.predict(sim_encoded_gbif)
                                             
-                                    # Encode identically to training data
-                                    sim_encoded = pd.get_dummies(sim_df)
-                                    sim_encoded = sim_encoded.reindex(columns=X_encoded.columns, fill_value=0)
-                                    
-                                    # Run the predictions for all 100 points
-                                    sim_preds = rf.predict(sim_encoded)
+                                            # Generate predictions for iNaturalist
+                                            sim_df_inat = sim_df.copy()
+                                            sim_df_inat['Data_Source'] = "iNaturalist"
+                                            sim_encoded_inat = pd.get_dummies(sim_df_inat).reindex(columns=X_encoded.columns, fill_value=0)
+                                            preds_inat = rf.predict(sim_encoded_inat)
+                                            
+                                            # Average the structural paths together
+                                            sim_preds = (preds_gbif + preds_inat) / 2.0
+                                        else:
+                                            sim_df['Data_Source'] = base_profile['Data_Source']
+                                            sim_encoded = pd.get_dummies(sim_df).reindex(columns=X_encoded.columns, fill_value=0)
+                                            sim_preds = rf.predict(sim_encoded)
+                                    else:
+                                        sim_encoded = pd.get_dummies(sim_df).reindex(columns=X_encoded.columns, fill_value=0)
+                                        sim_preds = rf.predict(sim_encoded)
                                     
                                     min_pred, max_pred = sim_preds.min(), sim_preds.max()
                                     shift_days = max_pred - min_pred
                                     
-                                    # Plot the sensitivity distribution curve
                                     plot_sim_df = pd.DataFrame({target_sim_var: sim_values, "Predicted DOY": sim_preds})
                                     fig_sim = px.line(
                                         plot_sim_df, x=target_sim_var, y="Predicted DOY", 
                                         title=f"Predicted Shift in {ml_target} across 1 SD of {target_sim_var}",
-                                        labels={target_sim_var: f"{target_sim_var} (Mean: {mu:.2f} ± {sigma:.2f})"}
+                                        labels={target_sim_var: f"{target_sim_var} (Span Range)"}
                                     )
                                     
-                                    # Draw the Mean and SD boundary lines
                                     fig_sim.add_vline(x=mu, line_dash="dash", line_color="black", annotation_text="Mean")
                                     fig_sim.add_vline(x=mu - sigma, line_dash="dot", line_color="gray", annotation_text="-1 SD")
                                     fig_sim.add_vline(x=mu + sigma, line_dash="dot", line_color="gray", annotation_text="+1 SD")
                                     
                                     st.plotly_chart(fig_sim, use_container_width=True)
                                     
-                                    st.success(f"**Insight:** For **{base_profile.get('Species', 'All Species')}** ({base_profile.get('Data_Source', 'Combined')}), as `{target_sim_var}` naturally fluctuates within 1 Standard Deviation, the model predicts the {ml_target} shifts by **{shift_days:.1f} units** (from {min_pred:.1f} to {max_pred:.1f}).")
-
+                                    st.success(f"**Insight:** For **{base_profile.get('Species', 'All Species')}** ({base_profile.get('Data_Source', 'Combined')}), as `{target_sim_var}` naturally fluctuates within 1 Standard Deviation, the model predicts the {ml_target} shifts by **{shift_days:.1f} days** (from {min_pred:.1f} to {max_pred:.1f}).")
 with tab6:
     st.markdown("### 🗄️ Comprehensive Database Master Ledger")
     st.info("⚠️ This dashboard exposes the raw, unfiltered master database. You are free to view, append, modify, or delete any record across the entire study project directly inside this workspace.")
