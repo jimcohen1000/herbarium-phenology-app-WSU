@@ -1295,6 +1295,23 @@ ggplot(df, aes(x={selected_x}, y={selected_y})) +
                     category_orders={"Climate_Regime": ["Warm & Dry", "Warm & Wet", "Cold & Dry", "Cold & Wet"]}
                 )
                 st.plotly_chart(fig_viol, use_container_width=True)
+
+                # Calculate summary statistics for the anomaly table
+                anomaly_summary = anomaly_df.groupby('Climate_Regime').agg(
+                    N=('DOY', 'count'),
+                    Mean_DOY=('DOY', 'mean'),
+                    Median_DOY=('DOY', 'median'),
+                    Mean_Temp_Anomaly=('Tave_Anomaly', 'mean'),
+                    Mean_Precip_Anomaly=('PPT_Anomaly', 'mean')
+                ).reset_index()
+                
+                # Round numeric columns for cleaner UI display
+                anomaly_summary = anomaly_summary.round(2)
+                
+                st.markdown("#### Climate Regime Summary Statistics")
+                st.write("This table defines the average temperature (°C) and precipitation (mm) deviations that characterize each regime, along with the resulting shift in the Day of Year (DOY).")
+                st.dataframe(anomaly_summary, use_container_width=True, hide_index=True)
+                
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
     unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
