@@ -1365,7 +1365,8 @@ with tab5:
                             if 'DOY' in X_raw.columns:
                                 X_raw['DOY_sin'] = np.sin(2 * np.pi * X_raw['DOY'] / 365.25)
                                 X_raw['DOY_cos'] = np.cos(2 * np.pi * X_raw['DOY'] / 365.25)
-                                X_raw = X_raw.drop(columns=['DOY'])                            y = ml_df[ml_target]
+                                X_raw = X_raw.drop(columns=['DOY'])                           
+                                y = ml_df[ml_target]
                             
                             X_encoded = pd.get_dummies(X_raw, drop_first=False)
                             
