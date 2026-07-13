@@ -1493,6 +1493,94 @@ with tab5:
                                     st.plotly_chart(fig_sim, use_container_width=True)
                                     
                                     st.success(f"**Insight:** For **{base_profile.get('Species', 'All Species')}** ({base_profile.get('Data_Source', 'Combined')}), as `{target_sim_var}` naturally fluctuates within 1 Standard Deviation, the model predicts the {ml_target} shifts by **{shift_days:.1f} days** (from {min_pred:.1f} to {max_pred:.1f}).")
+
+                                    # --- PHENOPHASE CLASSIFICATION (PROBABILITY CURVES) ---
+    st.write("---")
+    st.subheader("🌸 Phenophase Classification: Flowering Probability Curve")
+    st.write("Instead of predicting an exact day, this model calculates the probability of a plant flowering on any given day of the year based on its environmental conditions.")
+    
+    if 'Flowering' in plot_df.columns:
+        class_df = plot_df.dropna(subset=['Flowering']).copy()
+        
+        # Convert boolean (True/False) to binary (1/0) for the ML model
+        class_df['Flowering'] = class_df['Flowering'].astype(int) 
+        
+        clf_candidates = [c for c in num_cols if c != 'DOY'] + cat_cols
+        default_clf_feats = [c for c in ['Y_MAT', 'Latitude', 'Elevation', 'Photoperiod_Hours'] if c in clf_candidates]
+        
+        clf_features = st.multiselect(
+            "Select Environmental Predictors (DOY is automatically included):", 
+            clf_candidates, 
+            default=default_clf_feats, 
+            key="clf_feats"
+        )
+        
+        if st.button("📈 Train Probability Model & Generate Curve", type="primary"):
+            if class_df['Flowering'].nunique() < 2:
+                st.warning("Your dataset must contain both Flowering (True) and Non-Flowering (False) records to train this model. Keep scoring records!")
+            else:
+                with st.spinner("Training Phenophase Classifier..."):
+                    from sklearn.ensemble import RandomForestClassifier
+                    
+                    # 1. Prepare Data
+                    model_features = ['DOY'] + clf_features
+                    valid_class_df = class_df.dropna(subset=model_features).copy()
+                    
+                    X_clf = valid_class_df[model_features].copy()
+                    y_clf = valid_class_df['Flowering']
+                    
+                    # 2. Circular DOY transformation
+                    X_clf['DOY_sin'] = np.sin(2 * np.pi * X_clf['DOY'] / 365.25)
+                    X_clf['DOY_cos'] = np.cos(2 * np.pi * X_clf['DOY'] / 365.25)
+                    X_clf = X_clf.drop(columns=['DOY'])
+                    
+                    # 3. One-hot encoding for categorical variables
+                    X_clf_encoded = pd.get_dummies(X_clf, drop_first=False)
+                    
+                    # 4. Train Model
+                    clf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
+                    clf.fit(X_clf_encoded, y_clf)
+                    accuracy = clf.score(X_clf_encoded, y_clf)
+                    
+                    st.success(f"**Classification Model Trained!** | Accuracy: `{accuracy*100:.1f}%`")
+                    
+                    # 5. Simulate the probability curve across a full year (DOY 1 to 365)
+                    sim_doy = np.arange(1, 366)
+                    sim_data = pd.DataFrame({'DOY': sim_doy})
+                    
+                    # Circularize the simulated DOY
+                    sim_data['DOY_sin'] = np.sin(2 * np.pi * sim_data['DOY'] / 365.25)
+                    sim_data['DOY_cos'] = np.cos(2 * np.pi * sim_data['DOY'] / 365.25)
+                    sim_data = sim_data.drop(columns=['DOY'])
+                    
+                    # Fill all other selected features with their mean (or mode for categoricals)
+                    for col in clf_features:
+                        if col in cat_cols:
+                            mode_val = valid_class_df[col].mode()[0]
+                            sim_data[col] = mode_val
+                        else:
+                            mean_val = valid_class_df[col].mean()
+                            sim_data[col] = mean_val
+                            
+                    # Align columns with the trained model
+                    sim_encoded = pd.get_dummies(sim_data).reindex(columns=X_clf_encoded.columns, fill_value=0)
+                    
+                    # 6. Predict Probabilities ([:, 1] extracts the probability for class 1: Flowering)
+                    probs = clf.predict_proba(sim_encoded)[:, 1] 
+                    
+                    # 7. Plot the Bell Curve
+                    prob_df = pd.DataFrame({'Day of Year': sim_doy, 'Flowering Probability': probs})
+                    fig_prob = px.line(
+                        prob_df, x='Day of Year', y='Flowering Probability',
+                        title="Simulated Flowering Probability over the Year",
+                        labels={'Flowering Probability': 'Probability (0 to 1)'}
+                    )
+                    
+                    # Fill the area under the curve for a cleaner look
+                    fig_prob.update_traces(fill='tozeroy', line_color='#E45756')
+                    fig_prob.update_layout(yaxis_range=[0, 1.05])
+                    st.plotly_chart(fig_prob, use_container_width=True)
+                    st.caption("Note: This curve isolates the effect of time by holding your chosen environmental parameters constant at their statistical mean.")
 with tab6:
     st.markdown("### 🗄️ Comprehensive Database Master Ledger")
     st.info("⚠️ This dashboard exposes the raw, unfiltered master database. You are free to view, append, modify, or delete any record across the entire study project directly inside this workspace.")
