@@ -1253,7 +1253,48 @@ ggplot(df, aes(x={selected_x}, y={selected_y})) +
   theme_minimal()
 """
                     st.code(r_code, language="r")
+# --- PHENO-CLINE SPACE-FOR-TIME DASHBOARD ---
+            st.write("---")
+            st.subheader("🌍 Pheno-cline: Space-for-Time Substitution")
+            st.write("Hopkin's Bioclimatic Law suggests phenology is delayed by altitude and latitude. These gradients act as spatial proxies for climate change.")
+            
+            c_pc1, c_pc2 = st.columns(2)
+            with c_pc1:
+                if 'Latitude' in valid_plot_df.columns:
+                    fig_lat = px.scatter(
+                        valid_plot_df, x='Latitude', y='DOY', color='Species', 
+                        trendline="ols", title="DOY vs. Latitude (Hopkin's Law)",
+                        hover_data=['Year', 'Data_Source']
+                    )
+                    st.plotly_chart(fig_lat, use_container_width=True)
+            with c_pc2:
+                if 'Elevation' in valid_plot_df.columns:
+                    fig_elev = px.scatter(
+                        valid_plot_df, x='Elevation', y='DOY', color='Species', 
+                        trendline="ols", title="DOY vs. Elevation",
+                        hover_data=['Year', 'Data_Source']
+                    )
+                    st.plotly_chart(fig_elev, use_container_width=True)
 
+            # --- CLIMATE ANOMALY VIOLIN PLOTS ---
+            st.write("---")
+            st.subheader("🎻 Climate Anomaly Distributions")
+            st.write("How does the phenological window shift during extreme climatic years?")
+            
+            if 'Tave_Anomaly' in plot_df.columns and 'PPT_Anomaly' in plot_df.columns:
+                anomaly_df = plot_df.dropna(subset=['DOY', 'Tave_Anomaly', 'PPT_Anomaly']).copy()
+                
+                # Classify anomalies into regimes based on deviations from 0
+                anomaly_df['Temp_Regime'] = anomaly_df['Tave_Anomaly'].apply(lambda x: 'Warm' if x > 0 else 'Cold')
+                anomaly_df['Precip_Regime'] = anomaly_df['PPT_Anomaly'].apply(lambda x: 'Wet' if x > 0 else 'Dry')
+                anomaly_df['Climate_Regime'] = anomaly_df['Temp_Regime'] + " & " + anomaly_df['Precip_Regime']
+                
+                fig_viol = px.violin(
+                    anomaly_df, x='Climate_Regime', y='DOY', color='Climate_Regime', 
+                    box=True, points="all", title="DOY Distribution grouped by Climate Regime",
+                    category_orders={"Climate_Regime": ["Warm & Dry", "Warm & Wet", "Cold & Dry", "Cold & Wet"]}
+                )
+                st.plotly_chart(fig_viol, use_container_width=True)
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
     unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
@@ -1317,8 +1358,14 @@ with tab5:
                             from sklearn.ensemble import RandomForestRegressor
                             import numpy as np
                             
-                            X_raw = ml_df[ml_features]
-                            y = ml_df[ml_target]
+# Prepare features
+                            X_raw = ml_df[ml_features].copy()
+                            
+                            # Apply Circular Time Transformation if DOY is used as a predictor
+                            if 'DOY' in X_raw.columns:
+                                X_raw['DOY_sin'] = np.sin(2 * np.pi * X_raw['DOY'] / 365.25)
+                                X_raw['DOY_cos'] = np.cos(2 * np.pi * X_raw['DOY'] / 365.25)
+                                X_raw = X_raw.drop(columns=['DOY'])                            y = ml_df[ml_target]
                             
                             X_encoded = pd.get_dummies(X_raw, drop_first=False)
                             
