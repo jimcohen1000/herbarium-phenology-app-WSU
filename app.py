@@ -1375,18 +1375,23 @@ with tab5:
                             from sklearn.ensemble import RandomForestRegressor
                             import numpy as np
                             
-# Prepare features
+                            # 1. Prepare Features and strictly cast Target to float
                             X_raw = ml_df[ml_features].copy()
+                            y = ml_df[ml_target].astype(float)
                             
-                            # Apply Circular Time Transformation if DOY is used as a predictor
+                            # 2. Apply Circular Time Transformation if DOY is used as a predictor
                             if 'DOY' in X_raw.columns:
                                 X_raw['DOY_sin'] = np.sin(2 * np.pi * X_raw['DOY'] / 365.25)
                                 X_raw['DOY_cos'] = np.cos(2 * np.pi * X_raw['DOY'] / 365.25)
-                                X_raw = X_raw.drop(columns=['DOY'])                           
-                                y = ml_df[ml_target]
+                                X_raw = X_raw.drop(columns=['DOY'])
+                                
+                            # 3. Explicitly identify categoricals to prevent "Ghost Strings"
+                            present_cats = [c for c in cat_cols if c in X_raw.columns]
                             
-                            X_encoded = pd.get_dummies(X_raw, drop_first=False)
+                            # 4. One-Hot Encode and force EVERYTHING to float to prevent Boolean errors
+                            X_encoded = pd.get_dummies(X_raw, columns=present_cats, drop_first=False).astype(float)
                             
+                            # 5. Train Model
                             rf = RandomForestRegressor(n_estimators=100, random_state=42)
                             rf.fit(X_encoded, y)
                             score = rf.score(X_encoded, y)
