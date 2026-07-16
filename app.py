@@ -1451,10 +1451,21 @@ with tab5:
                             # 4. One-Hot Encode and force EVERYTHING to float to prevent Boolean errors
                             X_encoded = pd.get_dummies(X_raw, columns=present_cats, drop_first=False).astype(float)
                             
-                            # 5. Train Model
+                            from sklearn.model_selection import train_test_split
+                            
+                            # --- 70/30 SPLIT ---
+                            X_train, X_test, y_train, y_test = train_test_split(
+                                X_encoded, y, test_size=0.30, random_state=42
+                            )
+                            
+                            # 5. Train Model (on the 70%)
                             rf = RandomForestRegressor(n_estimators=100, random_state=42)
-                            rf.fit(X_encoded, y)
-                            score = rf.score(X_encoded, y)
+                            rf.fit(X_train, y_train)
+                            
+                            # Score Model (on the hidden 30%)
+                            score = rf.score(X_test, y_test)
+                            
+                            st.success(f"**Model trained successfully!** | Train Size: {len(X_train)} | Test Size: {len(X_test)}\n\nOut-of-Sample Predictive R²: `{score:.3f}`")
                             
                             st.success(f"**Model trained successfully on {len(ml_df)} samples!** |  Overall Predictive R²: `{score:.3f}`")
                             
@@ -1594,13 +1605,24 @@ with tab5:
                     X_clf['DOY_cos'] = np.cos(2 * np.pi * X_clf['DOY'] / 365.25)
                     X_clf = X_clf.drop(columns=['DOY'])
                     
-                    # 3. One-hot encoding for categorical variables
+                   # 3. One-hot encoding for categorical variables
                     X_clf_encoded = pd.get_dummies(X_clf, drop_first=False)
                     
-                    # 4. Train Model
+                    from sklearn.model_selection import train_test_split
+                    
+                    # --- 70/30 SPLIT ---
+                    X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
+                        X_clf_encoded, y_clf, test_size=0.30, random_state=42
+                    )
+                    
+                    # 4. Train Model (on the 70%)
                     clf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
-                    clf.fit(X_clf_encoded, y_clf)
-                    accuracy = clf.score(X_clf_encoded, y_clf)
+                    clf.fit(X_train_c, y_train_c)
+                    
+                    # Score Model (on the hidden 30%)
+                    accuracy = clf.score(X_test_c, y_test_c)
+                    
+                    st.success(f"**Classification Model Trained!** | Train Size: {len(X_train_c)} | Test Size: {len(X_test_c)}\n\nOut-of-Sample Accuracy: `{accuracy*100:.1f}%`")
                     
                     st.success(f"**Classification Model Trained!** | Accuracy: `{accuracy*100:.1f}%`")
                     
