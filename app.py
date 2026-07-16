@@ -607,12 +607,13 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
 
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
+
     
     col_yr1, col_yr2 = st.columns(2)
     with col_yr1: 
-        g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start_yr")
+        g_start = st.number_input("Start Year:", min_value=1902, max_value=2026, value=1902, key="g_start_yr")
     with col_yr2: 
-        g_end = st.number_input("End Year:", min_value=1800, max_value=current_year, value=current_year, key="g_end_yr")
+        g_end = st.number_input("End Year:", min_value=1902, max_value=current_year, value=current_year, key="g_end_yr")
         
     col_lim1, col_lim2 = st.columns(2)
     with col_lim1: 
@@ -722,9 +723,9 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     
     col_in1, col_in2 = st.columns(2)
     with col_in1: 
-        i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start_yr")
+        i_start = st.number_input("Start Year:", min_value=1902, max_value=2026, value=1980, key="i_start_yr")
     with col_in2: 
-        i_end = st.number_input("End Year:", min_value=1800, max_value=current_year, value=current_year, key="i_end_yr")
+        i_end = st.number_input("End Year:", min_value=1902, max_value=current_year, value=current_year, key="i_end_yr")
         
     col_ilim1, col_ilim2 = st.columns(2)
     with col_ilim1: 
@@ -1150,7 +1151,7 @@ with tab3:
                     with ec_a: 
                         start_y = st.number_input(f"Epoch {i+1} Start Year", min_value=1800, max_value=2030, value=1900 + (i*50), key=f"eps_{i}")
                     with ec_b: 
-                        end_y = st.number_input(f"Epoch {i+1} End Year", min_value=1800, max_value=current_year + 10, value=1950 + (i*50), key=f"epe_{i}")
+                        end_y = st.number_input(f"Epoch {i+1} End Year", min_value=1902, max_value=current_year + 10, value=1950 + (i*50), key=f"epe_{i}")
                     epochs.append((start_y, end_y))
                 
                 epoch_cols = st.columns(num_epochs)
