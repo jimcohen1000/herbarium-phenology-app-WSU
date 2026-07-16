@@ -189,6 +189,25 @@ def get_elevation(lat, lon):
         return None
     return None
 
+def normalize_location(lat, lon, provided_elev=None):
+    """
+    Rounds coordinates and resolves elevation to guarantee consistent cache keys.
+    """
+    # Round coordinates to 4 decimal places (~11 meters precision)
+    norm_lat = round(float(lat), 4)
+    norm_lon = round(float(lon), 4)
+    
+    # Resolve elevation consistently
+    if provided_elev is None or pd.isna(provided_elev) or provided_elev == 0.0:
+        norm_elev = get_elevation(norm_lat, norm_lon)
+        if norm_elev is None:
+            norm_elev = 0.0
+    else:
+        norm_elev = float(provided_elev)
+        
+    # Round elevation to 1 decimal place for strict cache matching
+    return norm_lat, norm_lon, round(norm_elev, 1)
+
 def smart_sleep():
     global LAST_API_CALL_TIME
     current_time = time.time()
@@ -412,15 +431,18 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
         doy = safe_int(row_dict.get('DOY'))
         el = safe_float(row_dict.get('Elevation'))
         
-        if lat is not None and lon is not None and year is not None:
+if lat is not None and lon is not None and year is not None:
+            # --- CACHE OPTIMIZATION: Normalize coords & resolve elevation ---
             if el is None or el == 0.0 or pd.isna(el):
                 status_text.text(f"Fetching elevation... ({count+1}/{len(cleaned_df)})")
-                fetched_el = get_elevation(lat, lon)
-                if fetched_el is not None:
-                    el = fetched_el
-                else:
-                    el = 0.0 
-                row_dict['Elevation'] = el
+                
+            lat, lon, el = normalize_location(lat, lon, el)
+            
+            # Save the clean, rounded values back to the row dictionary
+            row_dict['Latitude'] = lat
+            row_dict['Longitude'] = lon
+            row_dict['Elevation'] = el
+            # ----------------------------------------------------------------
             
             if doy is not None:
                 lat_rad = np.radians(lat)
