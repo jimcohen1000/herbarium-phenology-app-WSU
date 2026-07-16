@@ -768,7 +768,13 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
-            while len(raw_records) < max_to_fetch and page <= 15:
+            # --- PUT THESE 3 LINES BACK IN ---
+            raw_records = []
+            page = 1
+            max_to_fetch = max(i_limit * 10, 500)
+            # ---------------------------------
+            
+            while len(raw_records) < max_to_fetch and page <= 15:                
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
                     
