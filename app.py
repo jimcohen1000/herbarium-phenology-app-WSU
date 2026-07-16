@@ -1329,6 +1329,14 @@ ggplot(df, aes(x={selected_x}, y={selected_y})) +
                 
 with tab4:
     st.subheader("🎯 Rapid Image Scoring")
+    # Safety check: Ensure columns exist before filtering to prevent KeyErrors
+if 'Phenology_Scored' not in plot_df.columns:
+    plot_df['Phenology_Scored'] = False
+if 'URL' not in plot_df.columns:
+    plot_df['URL'] = ''
+
+# Your existing line 1332 (leave this as is):
+unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
     unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
     if unscored.empty: 
         st.success("🎉 All URL records within this focused workspace configuration have been scored!")
