@@ -179,16 +179,24 @@ def ensure_url_scheme(url_str):
     return url_str
 
 def get_elevation(lat, lon):
-    
     try:
+        smart_sleep()  # Slow down requests to avoid IP bans
         url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
         res = requests.get(url, timeout=5)
+        
+        # This will trigger the exception block below if Open-Meteo blocks us (e.g., 429 or 403 errors)
+        res.raise_for_status() 
+        
         if res.status_code == 200:
             elevations = res.json().get('elevation')
             if elevations and len(elevations) > 0: 
                 return float(elevations[0])
-    except: 
+                
+    except Exception as e: 
+        # Now you will actually see the error in your terminal running Streamlit!
+        print(f"⚠️ Elevation API failed for Lat: {lat}, Lon: {lon} | Error: {e}")
         return None
+        
     return None
 
 def normalize_location(lat, lon, provided_elev=None):
