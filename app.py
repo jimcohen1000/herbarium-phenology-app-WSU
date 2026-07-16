@@ -768,13 +768,13 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
             s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
             c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
             
-            raw_records = []
-            page = 1
-            max_to_fetch = max(i_limit * 10, 500)
-            
             while len(raw_records) < max_to_fetch and page <= 15:
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
+                    
+                    # 1. Add a mandatory 1-second delay to respect iNaturalist's API limits
+                    time.sleep(1.0)
+                    
                     res = requests.get(url, timeout=10)
                     
                     if res.status_code == 200:
@@ -820,7 +820,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                     "Data_Source": "iNaturalist", 
                                     "Collector": obs.get('user', {}).get('login', ''), 
                                     "Col_Number": np.nan,
-                                    "Barcode": obs.get('id', ''), 
+                                    "Barcode": str(obs.get('id', '')), 
                                     "Species": obs.get('taxon', {}).get('name', inat_spp), 
                                     "Year": obs_year, 
                                     "DOY": obs_doy, 
@@ -836,10 +836,18 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                         if len(results) < 200: 
                             break 
                         page += 1
-                    else: 
+                    else:
+                        # 2. STOP SILENT FAILURES: Show the actual API error code
+                        st.sidebar.error(f"⚠️ iNaturalist API Error: HTTP {res.status_code}")
                         break
-                except: 
+                except Exception as e: 
+                    # 3. Catch connection timeouts and show them
+                    st.sidebar.error(f"⚠️ Connection Failed: {e}")
                     break
+            
+            # 4. Warn the user if filtering dropped everything
+            if not raw_records:
+                st.sidebar.warning("No records matched your search. If you used State/County filters, try clearing them!")
                     
             pipeline_enrich_and_save(
                 pd.DataFrame(raw_records), 
