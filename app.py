@@ -10,6 +10,10 @@ import urllib.parse
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- RATE LIMITING GLOBALS ---
+LAST_API_CALL_TIME = 0.0
+API_RATE_LIMIT_DELAY = 0.7  # seconds
+
 # ==========================================
 #        APP SETUP & CANONICAL SCHEMA
 # ==========================================
@@ -173,6 +177,7 @@ def ensure_url_scheme(url_str):
     return url_str
 
 def get_elevation(lat, lon):
+    
     try:
         url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
         res = requests.get(url, timeout=5)
@@ -184,16 +189,25 @@ def get_elevation(lat, lon):
         return None
     return None
 
-@st.cache_data(show_spinner=False)
-def get_climate_data(lat, lon, el, prd):
-    if pd.isna(el) or el is None:
+def smart_sleep():
+    global LAST_API_CALL_TIME
+    current_time = time.time()
+    elapsed = current_time - LAST_API_CALL_TIME
+
+    if elapsed < API_RATE_LIMIT_DELAY:
+        time.sleep(API_RATE_LIMIT_DELAY - elapsed)
+
+    LAST_API_CALL_TIME = time.time()
+
+@st.cache_data(persist="disk", show_spinner=False, max_entries=5000)
+def get_climate_data(lat, lon, el, prd):    if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
     
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
     
     try:
-        time.sleep(0.7) 
+        smart_sleep() 
         res = requests.get(url, timeout=15)
         if res.status_code == 200:
             try:
