@@ -10,6 +10,8 @@ import urllib.parse
 import plotly.express as px
 import plotly.graph_objects as go
 
+current_year = datetime.now().year
+
 # --- RATE LIMITING GLOBALS ---
 LAST_API_CALL_TIME = 0.0
 API_RATE_LIMIT_DELAY = 0.7  # seconds
@@ -450,7 +452,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
                 val_clip = np.clip(-np.tan(lat_rad) * np.tan(dec_rad), -1.0, 1.0)
                 row_dict['Photoperiod_Hours'] = np.round((24.0 / np.pi) * np.arccos(val_clip), 2)
             
-            climate_year = min(year, 2024) 
+            climate_year = min(year, current_year - 1) 
             status_text.text(f"Fetching ClimateNA for Year_{climate_year}.ann... ({count+1}/{len(cleaned_df)})")
             
             year_data = get_climate_data(lat, lon, el, f"Year_{climate_year}.ann")
@@ -610,7 +612,7 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     with col_yr1: 
         g_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=1950, key="g_start_yr")
     with col_yr2: 
-        g_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="g_end_yr")
+        g_end = st.number_input("End Year:", min_value=1800, max_value=current_year, value=current_year, key="g_end_yr")
         
     col_lim1, col_lim2 = st.columns(2)
     with col_lim1: 
@@ -722,7 +724,7 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     with col_in1: 
         i_start = st.number_input("Start Year:", min_value=1800, max_value=2026, value=2000, key="i_start_yr")
     with col_in2: 
-        i_end = st.number_input("End Year:", min_value=1800, max_value=2026, value=2026, key="i_end_yr")
+        i_end = st.number_input("End Year:", min_value=1800, max_value=current_year, value=current_year, key="i_end_yr")
         
     col_ilim1, col_ilim2 = st.columns(2)
     with col_ilim1: 
@@ -1148,7 +1150,7 @@ with tab3:
                     with ec_a: 
                         start_y = st.number_input(f"Epoch {i+1} Start Year", min_value=1800, max_value=2030, value=1900 + (i*50), key=f"eps_{i}")
                     with ec_b: 
-                        end_y = st.number_input(f"Epoch {i+1} End Year", min_value=1800, max_value=2030, value=1950 + (i*50), key=f"epe_{i}")
+                        end_y = st.number_input(f"Epoch {i+1} End Year", min_value=1800, max_value=current_year + 10, value=1950 + (i*50), key=f"epe_{i}")
                     epochs.append((start_y, end_y))
                 
                 epoch_cols = st.columns(num_epochs)
