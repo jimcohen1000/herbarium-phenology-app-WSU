@@ -431,7 +431,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
         doy = safe_int(row_dict.get('DOY'))
         el = safe_float(row_dict.get('Elevation'))
         
-if lat is not None and lon is not None and year is not None:
+        if lat is not None and lon is not None and year is not None:
             # --- CACHE OPTIMIZATION: Normalize coords & resolve elevation ---
             if el is None or el == 0.0 or pd.isna(el):
                 status_text.text(f"Fetching elevation... ({count+1}/{len(cleaned_df)})")
@@ -525,7 +525,7 @@ if lat is not None and lon is not None and year is not None:
                         row_dict['N_3Mo_prior_mean_PPT'] = round(sum(n_p_vals) / 3.0, 2)
                         row_dict['PPT_Anomaly'] = round(row_dict['Y_3Mo_prior_mean_PPT'] - row_dict['N_3Mo_prior_mean_PPT'], 2)
 
-            records.append(row_dict)
+        records.append(row_dict)
         
     progress_bar.progress(1.0)
     
@@ -544,7 +544,6 @@ if lat is not None and lon is not None and year is not None:
         else: 
             time.sleep(2)
             st.rerun()
-
 # ==========================================
 #        SIDEBAR: DATA ENTRY
 # ==========================================
