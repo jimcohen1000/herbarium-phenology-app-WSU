@@ -1338,7 +1338,7 @@ if 'URL' not in plot_df.columns:
 # Your existing line 1332 (leave this as is):
 unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
 unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
-    if unscored.empty: 
+if unscored.empty: 
         st.success("🎉 All URL records within this focused workspace configuration have been scored!")
     else:
         st.info(f"You have **{len(unscored)}** unscored records remaining inside this workspace focus.")
