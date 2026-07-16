@@ -201,7 +201,7 @@ def smart_sleep():
 
 @st.cache_data(persist="disk", show_spinner=False, max_entries=5000)
 def get_climate_data(lat, lon, el, prd):    
-if pd.isna(el) or el is None:
+    if pd.isna(el) or el is None:
         return {"error": "Elevation missing", "systemic": False}
     
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
