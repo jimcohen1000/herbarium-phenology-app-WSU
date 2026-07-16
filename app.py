@@ -178,6 +178,7 @@ def ensure_url_scheme(url_str):
         
     return url_str
 
+@st.cache_data(persist="disk", show_spinner=False, max_entries=5000)
 def get_elevation(lat, lon):
     try:
         smart_sleep()  # Slow down requests to avoid IP bans
@@ -203,19 +204,18 @@ def normalize_location(lat, lon, provided_elev=None):
     """
     Rounds coordinates and resolves elevation to guarantee consistent cache keys.
     """
-    # Round coordinates to 4 decimal places (~11 meters precision)
     norm_lat = round(float(lat), 4)
     norm_lon = round(float(lon), 4)
     
-    # Resolve elevation consistently
-    if provided_elev is None or pd.isna(provided_elev) or provided_elev == 0.0:
+    # We remove 'or provided_elev == 0.0' so actual sea-level inputs aren't overwritten
+    if provided_elev is None or pd.isna(provided_elev):
         norm_elev = get_elevation(norm_lat, norm_lon)
+        # If API fails, return None, DO NOT force 0.0
         if norm_elev is None:
-            norm_elev = 0.0
+            return norm_lat, norm_lon, None
     else:
         norm_elev = float(provided_elev)
         
-    # Round elevation to 1 decimal place for strict cache matching
     return norm_lat, norm_lon, round(norm_elev, 1)
 
 def smart_sleep():
@@ -448,7 +448,12 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
                 
             lat, lon, el = normalize_location(lat, lon, el)
             
-            # Save the clean, rounded values back to the row dictionary
+            # --- ADD THIS SAFETY CHECK ---
+            if el is None:
+                # If elevation failed, skip to the next record so we don't fetch bad climate data
+                continue
+            # -----------------------------
+            
             row_dict['Latitude'] = lat
             row_dict['Longitude'] = lon
             row_dict['Elevation'] = el
