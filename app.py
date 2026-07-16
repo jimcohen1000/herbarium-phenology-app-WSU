@@ -452,9 +452,11 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
             lat, lon, el = normalize_location(lat, lon, el)
             
             # --- ADD THIS SAFETY CHECK ---
+            # --- ADD THIS SAFETY CHECK ---
             if el is None:
-                # If elevation failed, skip to the next record so we don't fetch bad climate data
+                st.sidebar.error(f"⚠️ Dropped: Open-Meteo Elevation failed for {lat}, {lon}. You might be rate-limited!")
                 continue
+                
             # -----------------------------
             
             row_dict['Latitude'] = lat
@@ -485,7 +487,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
                 break 
                 
             if "error" in year_data or "error" in norm_data: 
-                continue 
+                err_msg = year_data.get('error') if isinstance(year_data, dict) and 'error' in year_data else norm_data.get('error')
+                st.sidebar.error(f"⚠️ Dropped: ClimateNA API blocked the request -> {err_msg}")
+                continue
                 
             if isinstance(year_data, dict):
                 y_mapped = map_api_to_canonical(year_data, "Y_")
