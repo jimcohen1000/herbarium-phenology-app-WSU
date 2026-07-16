@@ -1340,7 +1340,7 @@ unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notn
 unscored = plot_df[(plot_df['Phenology_Scored'] == False) & (plot_df['URL'].notna()) & (plot_df['URL'].str.strip() != '') & (plot_df['URL'] != 'Manual')]
 if unscored.empty: 
         st.success("🎉 All URL records within this focused workspace configuration have been scored!")
-    else:
+else:
         st.info(f"You have **{len(unscored)}** unscored records remaining inside this workspace focus.")
         target_idx = st.selectbox("Select Record:", unscored.index, format_func=lambda x: f"Index {x}: {df.loc[x, 'Species']} ({df.loc[x, 'Data_Source']}) - Year {df.loc[x, 'Year']}")
         row = df.loc[target_idx]
