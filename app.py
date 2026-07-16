@@ -446,12 +446,17 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
         
         if lat is not None and lon is not None and year is not None:
             # --- CACHE OPTIMIZATION: Normalize coords & resolve elevation ---
+        # --- CACHE OPTIMIZATION: Normalize coords & resolve elevation ---
             if el is None or el == 0.0 or pd.isna(el):
                 status_text.text(f"Fetching elevation... ({count+1}/{len(cleaned_df)})")
                 
+                # --- ADD THIS LINE TO SLOW IT DOWN ---
+                time.sleep(1)
+                
+            # (Your existing code that gets elevation)
             lat, lon, el = normalize_location(lat, lon, el)
             
-            # --- ADD THIS SAFETY CHECK ---
+            # (The diagnostic check we just added)
             # --- ADD THIS SAFETY CHECK ---
             if el is None:
                 st.sidebar.error(f"⚠️ Dropped: Open-Meteo Elevation failed for {lat}, {lon}. You might be rate-limited!")
@@ -814,9 +819,21 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
                                 fetched_elev = np.nan
                                 
                                 if e_min is not None or e_max is not None:
+                                    
+                                    # --- ADD THIS LINE TO SLOW IT DOWN ---
+                                    time.sleep(1)
+                                    
+                                    # (Your existing code that gets elevation)
                                     el = get_elevation(lat_flt, lon_flt)
-                                    if el is None or (e_min and el < e_min) or (e_max and el > e_max): 
+                                    
+                                    # (The diagnostic check we just added)
+                                    if el is None:
+                                        st.sidebar.error(f"⚠️ Dropped: Open-Meteo Elevation failed for {lat_flt}, {lon_flt}. You might be rate-limited!")
                                         continue
+                                        
+                                    if (e_min and el < e_min) or (e_max and el > e_max): 
+                                        continue
+                                        
                                     fetched_elev = el
                                     
                                 try:
