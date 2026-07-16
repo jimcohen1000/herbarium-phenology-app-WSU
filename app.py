@@ -425,6 +425,9 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
     status_text = st.sidebar.empty()
     alert_placeholder = st.sidebar.empty() 
     
+    # Define it here so it always exists globally for the function!
+    sys_error = None 
+    
     for count, (idx, row) in enumerate(cleaned_df.iterrows()):
         progress_bar.progress(count / len(cleaned_df))
         
