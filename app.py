@@ -1063,10 +1063,10 @@ with tab2:
             else: 
                 target_color_col = 'Map_Label'
             
-            fig_map = px.scatter_mapbox(
+            fig_map = px.scatter_map(
                 map_df, lat="Latitude", lon="Longitude", color=target_color_col, 
                 hover_data=["Year", "DOY", "Data_Source", "Collector", "Species"], 
-                zoom=3, mapbox_style="carto-positron", title="Specimen Collection Sites"
+                zoom=3, map_style="carto-positron", title="Specimen Collection Sites"
             )
             fig_map.update_traces(marker=dict(size=9, opacity=0.8))
             fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
