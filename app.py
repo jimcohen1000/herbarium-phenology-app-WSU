@@ -95,6 +95,7 @@ CANONICAL_COLUMNS = [
     "Latitude", 
     "Longitude", 
     "Elevation", 
+    "County",
     "Photoperiod_Hours", 
     "Phenology_Scored", 
     "Flowering", 
@@ -403,20 +404,301 @@ def thin_and_cap_data(df, target_limit, max_per_year, distribute_by_decade=False
 #        THE CORE ENRICHMENT PIPELINE
 # ==========================================
 
-def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by_decade=False):
+# ==========================================
+#   PROJECT COUNTIES (Wasatch & Uinta)
+# ==========================================
+# Official US Census county boundaries for the project's counties, taken from the open
+# "us-atlas" dataset (a simplified version of the Census cartographic boundary files).
+#   Utah:    Rich, Cache, Box Elder, Weber, Morgan, Davis, Salt Lake, Summit,
+#            Duchesne, Wasatch, Utah, Juab, Sanpete
+#   Idaho:   Caribou, Franklin, Bear Lake
+#   Wyoming: Lincoln
+# Each county is a list of rings; each ring is a list of (latitude, longitude) corners.
+# The app merges the chosen counties into one outer outline, so the borders between two
+# chosen counties never matter. The boundaries are simplified, so an outer line can be off
+# by a kilometre or two -- the "edge margin" setting in the sidebar covers that.
+import math
+
+PROJECT_COUNTY_RINGS = {
+    "Box Elder, UT": [[(41.9933, -114.0411), (41.9882, -113.8222), (41.9985, -113.0002), (42.0011, -112.1926), (41.9968, -112.1639), (41.928, -112.1209), (41.8653, -112.0527), (41.7949, -112.0096), (41.7004, -112.0527), (41.6626, -112.0168), (41.5922, -112.006), (41.5337, -111.9809), (41.5526, -111.945), (41.532, -111.9127), (41.4745, -111.8768), (41.4607, -111.9163), (41.4264, -111.884), (41.4126, -111.9163), (41.4203, -111.9737), (41.3654, -111.9629), (41.3362, -112.0347), (41.3362, -112.2393), (41.0767, -112.4942), (41.0003, -112.7992), (41.0003, -113.2012), (41.0003, -114.0411)]],
+    "Cache, UT": [[(41.9968, -112.1639), (41.9976, -112.1101), (41.9994, -111.5071), (41.928, -111.4712), (41.9134, -111.5035), (41.8525, -111.5071), (41.8172, -111.4604), (41.7365, -111.4425), (41.7124, -111.4174), (41.6763, -111.4245), (41.6592, -111.403), (41.6179, -111.4281), (41.5535, -111.4317), (41.5037, -111.4784), (41.4229, -111.5107), (41.4221, -111.6184), (41.4075, -111.6543), (41.4169, -111.6973), (41.3757, -111.726), (41.3688, -111.7619), (41.392, -111.7978), (41.3989, -111.8696), (41.4264, -111.884), (41.4607, -111.9163), (41.4745, -111.8768), (41.532, -111.9127), (41.5526, -111.945), (41.5337, -111.9809), (41.5922, -112.006), (41.6626, -112.0168), (41.7004, -112.0527), (41.7949, -112.0096), (41.8653, -112.0527), (41.928, -112.1209)]],
+    "Davis, UT": [[(41.1394, -111.8553), (41.0664, -111.8517), (41.0226, -111.8373), (40.959, -111.7763), (40.9599, -111.8158), (40.8723, -111.7691), (40.8611, -111.7404), (40.8216, -111.8696), (40.8224, -111.945), (40.8869, -111.9701), (40.9221, -111.9593), (40.9212, -112.0096), (40.8465, -112.1496), (40.7692, -112.2608), (41.0767, -112.4942), (41.1532, -112.1855), (41.1523, -111.9701), (41.1351, -111.9127)]],
+    "Duchesne, UT": [[(40.6781, -110.9005), (40.7262, -110.8933), (40.7125, -110.8036), (40.7477, -110.7498), (40.74, -110.6564), (40.7692, -110.6241), (40.7572, -110.6062), (40.7614, -110.5236), (40.7795, -110.4841), (40.7889, -110.3729), (40.8233, -110.3406), (40.8336, -110.2939), (40.8207, -110.1611), (40.8078, -110.1001), (40.8138, -109.9996), (40.8096, -109.9781), (39.8062, -109.9781), (39.807, -110.5164), (39.8113, -110.5164), (39.813, -110.8574), (39.8998, -110.8574), (39.8998, -110.8933), (40.0828, -110.8969), (40.4316, -110.8969), (40.4316, -110.9041)]],
+    "Juab, UT": [[(39.9058, -114.0483), (39.905, -113.2479), (39.9041, -112.3434), (39.9445, -112.3398), (39.9393, -112.2716), (39.9892, -112.225), (40.0115, -112.1783), (39.9737, -112.1101), (39.929, -112.1029), (39.8938, -112.0527), (39.8654, -112.0814), (39.8294, -112.067), (39.7821, -112.0886), (39.777, -112.0455), (39.807, -111.9701), (39.8947, -111.9091), (39.9247, -111.8337), (39.9479, -111.8265), (39.8637, -111.7368), (39.8105, -111.7655), (39.813, -111.6435), (39.7838, -111.622), (39.7838, -111.5861), (39.74, -111.5861), (39.6945, -111.7189), (39.46, -111.7117), (39.46, -111.7476), (39.3827, -111.7476), (39.3818, -111.9235), (39.3663, -111.9593), (39.3371, -111.9593), (39.3371, -112.0168), (39.3148, -112.0168), (39.3294, -112.0706), (39.3294, -112.1891), (39.49, -112.1926), (39.5536, -112.2106), (39.5527, -112.8926), (39.5527, -113.815), (39.5442, -113.815), (39.5424, -114.0483)]],
+    "Morgan, UT": [[(41.3611, -111.421), (41.374, -111.3851), (41.3576, -111.3312), (41.2966, -111.263), (41.2253, -111.281), (41.215, -111.2235), (41.1643, -111.2415), (41.1437, -111.2666), (41.13, -111.3671), (41.087, -111.3815), (41.0819, -111.4461), (41.063, -111.5071), (40.9934, -111.5932), (40.9582, -111.5789), (40.9539, -111.525), (40.9195, -111.5286), (40.8585, -111.4784), (40.819, -111.5179), (40.7915, -111.5179), (40.7803, -111.5538), (40.8113, -111.6112), (40.7992, -111.6399), (40.8499, -111.665), (40.8611, -111.7404), (40.8723, -111.7691), (40.9599, -111.8158), (40.959, -111.7763), (41.0226, -111.8373), (41.0664, -111.8517), (41.1394, -111.8553), (41.1695, -111.8768), (41.1978, -111.8588), (41.2176, -111.8014), (41.2142, -111.7476), (41.1875, -111.7189), (41.1858, -111.6578), (41.2099, -111.6112), (41.2382, -111.5968), (41.2271, -111.4963), (41.2898, -111.4389), (41.3155, -111.4497)]],
+    "Rich, UT": [[(41.9994, -111.5071), (42.0019, -111.0477), (41.5801, -111.0441), (41.252, -111.0477), (41.2073, -111.1015), (41.1429, -111.2343), (41.1437, -111.2666), (41.1643, -111.2415), (41.215, -111.2235), (41.2253, -111.281), (41.2966, -111.263), (41.3576, -111.3312), (41.374, -111.3851), (41.3611, -111.421), (41.3843, -111.4784), (41.4229, -111.5107), (41.5037, -111.4784), (41.5535, -111.4317), (41.6179, -111.4281), (41.6592, -111.403), (41.6763, -111.4245), (41.7124, -111.4174), (41.7365, -111.4425), (41.8172, -111.4604), (41.8525, -111.5071), (41.9134, -111.5035), (41.928, -111.4712)]],
+    "Salt Lake, UT": [[(40.7692, -112.2608), (40.8465, -112.1496), (40.9212, -112.0096), (40.9221, -111.9593), (40.8869, -111.9701), (40.8224, -111.945), (40.8216, -111.8696), (40.8611, -111.7404), (40.8499, -111.665), (40.7992, -111.6399), (40.7735, -111.6507), (40.6987, -111.5932), (40.6669, -111.604), (40.6094, -111.5538), (40.5767, -111.5932), (40.5682, -111.6363), (40.5312, -111.683), (40.5295, -111.7619), (40.4754, -111.8373), (40.4719, -111.884), (40.4247, -111.945), (40.4144, -111.9809), (40.4642, -112.0383), (40.4393, -112.1137), (40.4702, -112.1424), (40.4668, -112.1711), (40.6042, -112.1747), (40.6292, -112.1962), (40.7159, -112.207)]],
+    "Sanpete, UT": [[(39.813, -111.6435), (39.813, -111.2487), (39.7039, -111.2487), (39.4668, -111.2487), (39.4668, -111.3025), (39.2942, -111.2989), (39.0322, -111.2989), (39.033, -111.8517), (39.0459, -111.8517), (39.0459, -112.0132), (39.3148, -112.0168), (39.3371, -112.0168), (39.3371, -111.9593), (39.3663, -111.9593), (39.3818, -111.9235), (39.3827, -111.7476), (39.46, -111.7476), (39.46, -111.7117), (39.6945, -111.7189), (39.74, -111.5861), (39.7838, -111.5861), (39.7838, -111.622)]],
+    "Summit, UT": [[(40.7992, -111.6399), (40.8113, -111.6112), (40.7803, -111.5538), (40.7915, -111.5179), (40.819, -111.5179), (40.8585, -111.4784), (40.9195, -111.5286), (40.9539, -111.525), (40.9582, -111.5789), (40.9934, -111.5932), (41.063, -111.5071), (41.0819, -111.4461), (41.087, -111.3815), (41.13, -111.3671), (41.1437, -111.2666), (41.1429, -111.2343), (41.2073, -111.1015), (41.252, -111.0477), (40.9977, -111.0477), (40.996, -110.7139), (40.9951, -110.2365), (40.9977, -110.0498), (40.9977, -109.9996), (40.8138, -109.9996), (40.8078, -110.1001), (40.8207, -110.1611), (40.8336, -110.2939), (40.8233, -110.3406), (40.7889, -110.3729), (40.7795, -110.4841), (40.7614, -110.5236), (40.7572, -110.6062), (40.7692, -110.6241), (40.74, -110.6564), (40.7477, -110.7498), (40.7125, -110.8036), (40.7262, -110.8933), (40.6781, -110.9005), (40.6807, -110.9328), (40.5931, -110.9759), (40.5776, -111.0261), (40.5948, -111.08), (40.5905, -111.1195), (40.5484, -111.1518), (40.5871, -111.2666), (40.6231, -111.3276), (40.6292, -111.3671), (40.691, -111.3958), (40.6438, -111.4748), (40.5991, -111.4891), (40.6094, -111.5538), (40.6669, -111.604), (40.6987, -111.5932), (40.7735, -111.6507)]],
+    "Utah, UT": [[(40.4668, -112.1711), (40.4702, -112.1424), (40.4393, -112.1137), (40.4642, -112.0383), (40.4144, -111.9809), (40.4247, -111.945), (40.4719, -111.884), (40.4754, -111.8373), (40.5295, -111.7619), (40.5312, -111.683), (40.5682, -111.6363), (40.5767, -111.5932), (40.5475, -111.5681), (40.4865, -111.5753), (40.4496, -111.622), (40.3663, -111.5538), (40.362, -111.482), (40.3216, -111.4389), (40.2898, -111.4425), (40.2967, -111.3743), (40.2864, -111.3133), (40.2426, -111.263), (40.222, -111.2738), (40.167, -111.2271), (40.1249, -111.22), (40.0553, -111.2487), (40.0476, -111.2056), (39.9909, -111.1661), (39.9685, -111.1195), (39.9471, -111.1302), (39.9436, -111.0836), (39.8998, -111.0836), (39.8998, -110.8933), (39.8998, -110.8574), (39.813, -110.8574), (39.813, -111.2487), (39.813, -111.6435), (39.8105, -111.7655), (39.8637, -111.7368), (39.9479, -111.8265), (39.9247, -111.8337), (39.8947, -111.9091), (39.807, -111.9701), (39.777, -112.0455), (39.7821, -112.0886), (39.8294, -112.067), (39.8654, -112.0814), (39.8938, -112.0527), (39.929, -112.1029), (39.9737, -112.1101), (40.0115, -112.1783), (40.0596, -112.1819), (40.1077, -112.1496), (40.1541, -112.1747), (40.173, -112.146), (40.2116, -112.1496), (40.264, -112.1926), (40.3259, -112.1962), (40.3362, -112.1747), (40.3826, -112.1998), (40.4548, -112.2142)]],
+    "Wasatch, UT": [[(40.5767, -111.5932), (40.6094, -111.5538), (40.5991, -111.4891), (40.6438, -111.4748), (40.691, -111.3958), (40.6292, -111.3671), (40.6231, -111.3276), (40.5871, -111.2666), (40.5484, -111.1518), (40.5905, -111.1195), (40.5948, -111.08), (40.5776, -111.0261), (40.5931, -110.9759), (40.6807, -110.9328), (40.6781, -110.9005), (40.4316, -110.9041), (40.4316, -110.8969), (40.0828, -110.8969), (39.8998, -110.8933), (39.8998, -111.0836), (39.9436, -111.0836), (39.9471, -111.1302), (39.9685, -111.1195), (39.9909, -111.1661), (40.0476, -111.2056), (40.0553, -111.2487), (40.1249, -111.22), (40.167, -111.2271), (40.222, -111.2738), (40.2426, -111.263), (40.2864, -111.3133), (40.2967, -111.3743), (40.2898, -111.4425), (40.3216, -111.4389), (40.362, -111.482), (40.3663, -111.5538), (40.4496, -111.622), (40.4865, -111.5753), (40.5475, -111.5681)]],
+    "Weber, UT": [[(41.0767, -112.4942), (41.3362, -112.2393), (41.3362, -112.0347), (41.3654, -111.9629), (41.4203, -111.9737), (41.4126, -111.9163), (41.4264, -111.884), (41.3989, -111.8696), (41.392, -111.7978), (41.3688, -111.7619), (41.3757, -111.726), (41.4169, -111.6973), (41.4075, -111.6543), (41.4221, -111.6184), (41.4229, -111.5107), (41.3843, -111.4784), (41.3611, -111.421), (41.3155, -111.4497), (41.2898, -111.4389), (41.2271, -111.4963), (41.2382, -111.5968), (41.2099, -111.6112), (41.1858, -111.6578), (41.1875, -111.7189), (41.2142, -111.7476), (41.2176, -111.8014), (41.1978, -111.8588), (41.1695, -111.8768), (41.1394, -111.8553), (41.1351, -111.9127), (41.1523, -111.9701), (41.1532, -112.1855)]],
+    "Bear Lake, ID": [[(42.5139, -111.0477), (42.0019, -111.0477), (41.9994, -111.5071), (42.0689, -111.5143), (42.099, -111.6004), (42.142, -111.5861), (42.154, -111.6076), (42.2072, -111.6255), (42.2459, -111.6148), (42.2768, -111.5609), (42.288, -111.5861), (42.3258, -111.5896), (42.3516, -111.5538), (42.3911, -111.6004), (42.4151, -111.6004), (42.4297, -111.5789), (42.5698, -111.6363), (42.5904, -111.6004), (42.5904, -111.3671), (42.5526, -111.281), (42.6033, -111.2415), (42.5723, -111.2235), (42.4787, -111.2343), (42.4736, -111.1697), (42.501, -111.062)]],
+    "Caribou, ID": [[(43.0225, -112.0634), (43.0199, -111.5896), (43.0191, -111.0441), (42.7227, -111.0441), (42.5139, -111.0477), (42.501, -111.062), (42.4736, -111.1697), (42.4787, -111.2343), (42.5723, -111.2235), (42.6033, -111.2415), (42.5526, -111.281), (42.5904, -111.3671), (42.5904, -111.6004), (42.5698, -111.6363), (42.4297, -111.5789), (42.4151, -111.6004), (42.416, -111.8768), (42.489, -111.884), (42.5242, -111.9163), (42.617, -111.9163), (42.6359, -111.945), (42.6746, -111.945), (42.7184, -111.9701), (42.7184, -112.0563), (42.6995, -112.1065), (42.751, -112.1388), (42.7905, -112.146), (42.8309, -112.1209), (42.8953, -112.1496), (42.9443, -112.128), (42.9503, -112.0814), (42.9735, -112.0886), (42.9907, -112.0527)]],
+    "Franklin, ID": [[(42.2854, -112.1245), (42.2854, -111.9845), (42.2562, -111.9845), (42.2562, -111.8983), (42.416, -111.8947), (42.416, -111.8768), (42.4151, -111.6004), (42.3911, -111.6004), (42.3516, -111.5538), (42.3258, -111.5896), (42.288, -111.5861), (42.2768, -111.5609), (42.2459, -111.6148), (42.2072, -111.6255), (42.154, -111.6076), (42.142, -111.5861), (42.099, -111.6004), (42.0689, -111.5143), (41.9994, -111.5071), (41.9976, -112.1101), (42.1703, -112.1101), (42.1694, -112.0706), (42.2382, -112.0706)]],
+    "Lincoln, WY": [[(42.5139, -111.0477), (42.7227, -111.0441), (43.0191, -111.0441), (43.3154, -111.0441), (43.3137, -110.8144), (43.2355, -110.8144), (43.2355, -110.5775), (43.1264, -110.5775), (43.1264, -110.5882), (42.7794, -110.5882), (42.7794, -110.6241), (42.7098, -110.6241), (42.7098, -110.5918), (42.4486, -110.5918), (42.4486, -110.5416), (42.2777, -110.5416), (42.2768, -110.2078), (42.2708, -110.0534), (42.0303, -110.0534), (42.0071, -110.0463), (41.5784, -110.0463), (41.5793, -110.5811), (41.5801, -111.0441), (42.0019, -111.0477)]],
+}
+
+def _county_bbox(rings):
+    lats = [p[0] for ring in rings for p in ring]
+    lons = [p[1] for ring in rings for p in ring]
+    return min(lats), max(lats), min(lons), max(lons)
+
+PROJECT_COUNTY_BBOX = {name: _county_bbox(rings) for name, rings in PROJECT_COUNTY_RINGS.items()}
+
+def point_in_polygon(lat, lon, corners):
+    """Ray-casting test: is (lat, lon) inside this ring of (lat, lon) corners?"""
+    inside = False
+    j = len(corners) - 1
+    for i in range(len(corners)):
+        lat_i, lon_i = corners[i]
+        lat_j, lon_j = corners[j]
+        if (lat_i > lat) != (lat_j > lat):
+            lon_cross = (lon_j - lon_i) * (lat - lat_i) / (lat_j - lat_i) + lon_i
+            if lon < lon_cross:
+                inside = not inside
+        j = i
+    return inside
+
+def _point_in_rings(lat, lon, rings):
+    inside = False
+    for ring in rings:
+        if point_in_polygon(lat, lon, ring):
+            inside = not inside
+    return inside
+
+def _km_to_rings(lat, lon, rings):
+    """Approximate distance (km) from a point to the nearest county-line segment."""
+    kx = 111.32 * math.cos(math.radians(lat))
+    ky = 110.57
+    best = float("inf")
+    for ring in rings:
+        n = len(ring)
+        for i in range(n):
+            lat_a, lon_a = ring[i]
+            lat_b, lon_b = ring[(i + 1) % n]
+            ax, ay = (lon_a - lon) * kx, (lat_a - lat) * ky
+            bx, by = (lon_b - lon) * kx, (lat_b - lat) * ky
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            t = 0.0 if seg2 == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / seg2))
+            d = math.hypot(ax + t * dx, ay + t * dy)
+            if d < best:
+                best = d
+    return best
+
+def merge_outline(selected_names):
+    """Combine the chosen counties into one outer outline. A border shared by two selected
+    counties appears twice (once per county) and cancels out; only the outer edge is left.
+    Returns a list of rings (several if the counties aren't all touching, or if a hole is
+    left in the middle)."""
+    edge_count = {}
+    for name in selected_names:
+        for ring in PROJECT_COUNTY_RINGS[name]:
+            n = len(ring)
+            for i in range(n):
+                p, q = ring[i], ring[(i + 1) % n]
+                if p == q:
+                    continue
+                key = (p, q) if p <= q else (q, p)
+                edge_count[key] = edge_count.get(key, 0) + 1
+    boundary = [k for k, c in edge_count.items() if c % 2 == 1]
+    neighbours = {}
+    for p, q in boundary:
+        neighbours.setdefault(p, []).append(q)
+        neighbours.setdefault(q, []).append(p)
+    used = set()
+    rings = []
+    for p, q in boundary:
+        if (p, q) in used:
+            continue
+        used.add((p, q))
+        ring, cur = [p], q
+        while cur != p:
+            ring.append(cur)
+            for cand in neighbours[cur]:
+                k = (cur, cand) if cur <= cand else (cand, cur)
+                if k not in used:
+                    used.add(k)
+                    cur = cand
+                    break
+            else:
+                break
+        if len(ring) >= 3:
+            rings.append(ring)
+    return rings
+
+def build_region(selected_names, margin_km):
+    """Bundle the chosen counties with their merged outline and the search box
+    (padded by the edge margin) that gets sent to GBIF / iNaturalist."""
+    boxes = [PROJECT_COUNTY_BBOX[n] for n in selected_names]
+    min_lat = min(b[0] for b in boxes)
+    max_lat = max(b[1] for b in boxes)
+    min_lon = min(b[2] for b in boxes)
+    max_lon = max(b[3] for b in boxes)
+    pad_lat = margin_km / 110.57
+    pad_lon = margin_km / (111.32 * math.cos(math.radians((min_lat + max_lat) / 2)))
+    return {
+        "counties": {n: PROJECT_COUNTY_RINGS[n] for n in selected_names},
+        "outline": merge_outline(selected_names),
+        "bbox": (round(min_lat - pad_lat, 4), round(max_lat + pad_lat, 4),
+                 round(min_lon - pad_lon, 4), round(max_lon + pad_lon, 4)),
+        "margin_km": margin_km,
+    }
+
+def _name_county(lat, lon, counties):
+    """Which of these counties holds the point? (nearest one if it sits just outside them all)"""
+    for name, rings in counties.items():
+        b = PROJECT_COUNTY_BBOX[name]
+        if b[0] <= lat <= b[1] and b[2] <= lon <= b[3] and _point_in_rings(lat, lon, rings):
+            return name
+    best_name, best_d = None, None
+    for name, rings in counties.items():
+        d = _km_to_rings(lat, lon, rings)
+        if best_d is None or d < best_d:
+            best_name, best_d = name, d
+    return best_name
+
+def locate_in_region(lat, lon, region):
+    """Keep-or-skip test. Returns the county name if the point is inside the combined outline
+    (or within the edge margin of it), otherwise None. Borders between two selected counties
+    play no part -- only the outer outline decides."""
+    if not _point_in_rings(lat, lon, region["outline"]):
+        margin = region["margin_km"]
+        if margin <= 0:
+            return None
+        b = region["bbox"]
+        if lat < b[0] - 0.2 or lat > b[1] + 0.2 or lon < b[2] - 0.3 or lon > b[3] + 0.3:
+            return None
+        if _km_to_rings(lat, lon, region["outline"]) > margin:
+            return None
+    return _name_county(lat, lon, region["counties"])
+
+def county_label(lat, lon):
+    """Project county that holds the point, or None if it's outside all 17 (used for the County column)."""
+    for name, rings in PROJECT_COUNTY_RINGS.items():
+        b = PROJECT_COUNTY_BBOX[name]
+        if b[0] <= lat <= b[1] and b[2] <= lon <= b[3] and _point_in_rings(lat, lon, rings):
+            return name
+    return None
+
+# ==========================================
+#   DUPLICATE SKIPPING + LAST-FETCH SUMMARY
+# ==========================================
+
+def _normalize_barcode(v):
+    s = str(v).strip().lower()
+    if s in ("", "nan", "none", "<na>"):
+        return ""
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    if s.isdigit():
+        # Spreadsheets silently drop leading zeros, so compare without them.
+        s = s.lstrip("0") or "0"
+    return s
+
+def _record_keys(df):
+    """One identity key per record: source + barcode + year + day-of-year.
+    Falls back to source + URL when a record has no barcode."""
+    keys = []
+    for src, bc, yr, doy, url in zip(df["Data_Source"], df["Barcode"], df["Year"], df["DOY"], df["URL"]):
+        b = _normalize_barcode(bc)
+        if b:
+            keys.append(f"{str(src).strip()}|{b}|{safe_int(yr)}|{safe_int(doy)}")
+        else:
+            keys.append(f"{str(src).strip()}|{str(url).strip()}")
+    return pd.Series(keys, index=df.index)
+
+def load_existing_records_for_dedupe():
+    """Fresh read of Master + Submissions so other collectors' latest saves count too."""
+    if not os.path.exists(DB_FILE):
+        return pd.DataFrame(columns=CANONICAL_COLUMNS)
+    return pd.read_csv(DB_FILE)
+
+def drop_already_downloaded(raw_df, notes):
+    """Remove records already stored in the database, plus repeats inside this fetch.
+    Returns (new_df, n_already_in_database, n_repeated_in_batch)."""
+    raw_df = raw_df.copy()
+    raw_df["_dedupe_key"] = _record_keys(raw_df)
+
+    before = len(raw_df)
+    raw_df = raw_df.drop_duplicates(subset="_dedupe_key", keep="first")
+    n_batch = before - len(raw_df)
+
+    n_db = 0
+    try:
+        existing = load_existing_records_for_dedupe()
+        if not existing.empty:
+            existing_keys = set(_record_keys(existing))
+            is_dupe = raw_df["_dedupe_key"].isin(existing_keys)
+            n_db = int(is_dupe.sum())
+            raw_df = raw_df[~is_dupe]
+    except Exception as e:
+        notes.append(
+            f"Couldn't check the database for existing records ({type(e).__name__}), "
+            "so duplicates were NOT skipped this time."
+        )
+    return raw_df.drop(columns="_dedupe_key").reset_index(drop=True), n_db, n_batch
+
+def render_fetch_summary():
+    """Show the most recent fetch's record counts. Kept in session_state so it
+    survives the automatic page refresh that follows a successful save."""
+    summary = st.session_state.get("last_fetch_summary")
+    if not summary:
+        return
+    st.sidebar.markdown(f"**📊 Last fetch summary** ({summary.get('when', '')})")
+    for line in summary["lines"]:
+        st.sidebar.markdown(f"- {line}")
+    for note in summary["notes"]:
+        st.sidebar.warning(note)
+    if st.sidebar.button("Dismiss summary", key="dismiss_fetch_summary"):
+        st.session_state.pop("last_fetch_summary", None)
+        st.rerun()
+
+def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by_decade=False, fetch_stats=None):
+    summary = {
+        "lines": list((fetch_stats or {}).get("lines", [])),
+        "notes": list((fetch_stats or {}).get("notes", [])),
+    }
+
+    def _publish():
+        summary["when"] = datetime.now().strftime("%H:%M:%S")
+        st.session_state["last_fetch_summary"] = summary
+
     if raw_df.empty:
+        _publish()
         st.sidebar.warning("No records found (or none passed the filters).")
         return
 
-    st.sidebar.text(f"Applying de-clustering & sample distribution...")
+    # --- Skip specimens that are already stored in the shared database ---
+    raw_df, n_dupes_db, n_dupes_batch = drop_already_downloaded(raw_df, summary["notes"])
+    if n_dupes_db:
+        summary["lines"].append(f"{n_dupes_db:,} already in the database (skipped)")
+    if n_dupes_batch:
+        summary["lines"].append(f"{n_dupes_batch:,} repeated within this fetch (skipped)")
+    summary["lines"].append(f"{len(raw_df):,} new records available")
+
+    if raw_df.empty:
+        summary["notes"].append("Every usable record from this search is already in the database, so nothing was added.")
+        _publish()
+        st.sidebar.info("Nothing new to add -- all matching records are already in the database.")
+        return
+
+    st.sidebar.text("Applying de-clustering & sample distribution...")
     cleaned_df = thin_and_cap_data(
-        raw_df, 
-        target_limit=target_limit, 
-        max_per_year=max_per_year, 
+        raw_df,
+        target_limit=target_limit,
+        max_per_year=max_per_year,
         distribute_by_decade=distribute_by_decade
     )
-    
+    summary["lines"].append(
+        f"{len(cleaned_df):,} selected after thinning "
+        f"(limit {target_limit}, max {max_per_year} per year"
+        f"{', spread across decades' if distribute_by_decade else ''})"
+    )
+
     if cleaned_df.empty:
+        _publish()
         st.sidebar.warning("No valid records remained after filtering.")
         return
 
@@ -555,22 +837,37 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
         records.append(row_dict)
         
     progress_bar.progress(1.0)
-    
+
+    not_saved = len(cleaned_df) - len(records)
+    summary["lines"].append(f"{len(records):,} saved to the database")
+    if not_saved > 0:
+        summary["notes"].append(
+            f"{not_saved} selected record(s) weren't saved because their elevation or ClimateNA lookup "
+            "failed or hit a rate limit. Running the same fetch again later will pick them up -- "
+            "records already saved are skipped."
+        )
+    if sys_error:
+        summary["notes"].append(f"Processing stopped early: {sys_error}")
+    _publish()
+
     if sys_error is None:
         status_text.text("Finished processing pipeline!")
         st.sidebar.success(f"Successfully processed {len(records)} records!")
-    
+
     if records:
         final_new_df = pd.DataFrame(records)
-        master_df = pd.read_csv(DB_FILE)
-        combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
-        save_with_ordered_columns(combined_df, DB_FILE)
-        
-        if sys_error is not None: 
+        with st.spinner("Saving new records to the database file..."):
+            master_df = pd.read_csv(DB_FILE)
+            combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
+            save_with_ordered_columns(combined_df, DB_FILE)
+
+        if sys_error is not None:
+            render_fetch_summary()
             st.stop()
-        else: 
+        else:
             time.sleep(2)
             st.rerun()
+
 # ==========================================
 #        SIDEBAR: DATA ENTRY
 # ==========================================
@@ -630,6 +927,62 @@ with st.sidebar.expander("✏️ Manual Entry", expanded=False):
                     distribute_by_decade=False
                 )
 
+with st.sidebar.expander("📍 Project Counties (Wasatch & Uinta)", expanded=False):
+    st.caption(
+        "Keeps only specimens located inside the selected counties, for both GBIF and iNaturalist, "
+        "using official US Census county boundaries (simplified). The counties are merged into one "
+        "outer outline, so borders between two selected counties never cause a miss. When it's on, "
+        "the State/County text boxes below are ignored."
+    )
+    region_on = st.checkbox("Only keep specimens inside the selected counties", value=False, key="region_on")
+    region_names = st.multiselect(
+        "Counties:", options=list(PROJECT_COUNTY_RINGS.keys()),
+        default=list(PROJECT_COUNTY_RINGS.keys()), key="region_counties"
+    )
+    region_margin = st.slider(
+        "Edge margin (km):", min_value=0, max_value=15, value=3, key="region_margin",
+        help="Also keep specimens up to this far outside the outer outline. The boundaries are "
+             "simplified and specimen coordinates are often approximate, so a small margin avoids "
+             "losing records right at the edge. Set 0 for the strict outline."
+    )
+    active_region = None
+    region_blocked = False
+    if not region_names:
+        st.warning("Pick at least one county.")
+        region_blocked = bool(region_on)
+    else:
+        preview_region = build_region(region_names, region_margin)
+        st.caption(
+            f"Search box sent to GBIF / iNaturalist: latitude {preview_region['bbox'][0]:.2f} to "
+            f"{preview_region['bbox'][1]:.2f}, longitude {preview_region['bbox'][2]:.2f} to "
+            f"{preview_region['bbox'][3]:.2f}"
+        )
+        if region_on:
+            active_region = preview_region
+        if st.checkbox("Show the outline on a map", key="region_preview"):
+            try:
+                map_lat, map_lon = [], []
+                for ring in preview_region["outline"]:
+                    closed_ring = list(ring) + [ring[0]]
+                    map_lat += [p[0] for p in closed_ring] + [None]
+                    map_lon += [p[1] for p in closed_ring] + [None]
+                fig_region = go.Figure(go.Scattergeo(
+                    lat=map_lat, lon=map_lon, mode="lines", fill="toself", hoverinfo="skip"
+                ))
+                fig_region.update_geos(
+                    scope="usa", fitbounds="locations", resolution=50,
+                    showsubunits=True, showlakes=True
+                )
+                fig_region.update_layout(height=320, margin=dict(l=0, r=0, t=0, b=0))
+                st.plotly_chart(fig_region, use_container_width=True)
+                n_rings = len(preview_region["outline"])
+                st.caption(
+                    "Outer outline of the selected counties."
+                    + (f" It has {n_rings} separate pieces." if n_rings > 1 else "")
+                )
+            except Exception:
+                st.caption("Map preview isn't available in this setup.")
+
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
 
@@ -656,91 +1009,166 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     with col_e2: 
         g_emax = st.text_input("Max Elev (m):", key="g_emax")
     
-    if st.button("Fetch & Process GBIF", type="primary", use_container_width=True):
+    if region_blocked:
+        st.warning("Fetching is paused: the project counties are switched on but none are selected (see 📍 Project Counties).")
+    if st.button("Fetch & Process GBIF", type="primary", use_container_width=True, disabled=region_blocked):
         with st.spinner("Paginating GBIF..."):
             spp_encoded = urllib.parse.quote(gbif_spp)
             e_min = parse_elev(g_emin)
             e_max = parse_elev(g_emax)
             base_url = f"https://api.gbif.org/v1/occurrence/search?scientificName={spp_encoded}&year={g_start},{g_end}&hasCoordinate=true&basisOfRecord=PRESERVED_SPECIMEN"
-            
-            if g_states:
-                for s in g_states.split(','): 
+
+            if g_states and not active_region:
+                for s in g_states.split(','):
                     base_url += f"&stateProvince={urllib.parse.quote(s.strip())}"
-            if g_counties:
-                for c in g_counties.split(','): 
+            if g_counties and not active_region:
+                for c in g_counties.split(','):
                     base_url += f"&county={urllib.parse.quote(c.strip())}"
-            if e_min is not None or e_max is not None: 
+            if e_min is not None or e_max is not None:
                 base_url += f"&elevation={e_min if e_min else ''},{e_max if e_max else ''}"
+            if active_region:
+                a_min_lat, a_max_lat, a_min_lon, a_max_lon = active_region["bbox"]
+                base_url += f"&decimalLatitude={a_min_lat},{a_max_lat}&decimalLongitude={a_min_lon},{a_max_lon}"
 
             raw_records = []
             offset = 0
             end_of_records = False
             max_to_fetch = max(g_limit * 10, 500)
-            
+            stats = {"lines": [], "notes": []}
+            gbif_total = None
+            n_scanned = 0
+            n_no_image = 0
+            n_no_date = 0
+            n_outside_region = 0
+            by_county = {}
+
             while len(raw_records) < max_to_fetch and not end_of_records and offset < 9000:
                 try:
                     res = requests.get(base_url + f"&limit=300&offset={offset}", timeout=10)
                     if res.status_code == 200:
                         data = res.json()
                         results = data.get('results', [])
-                        
-                        if not results: 
+                        if gbif_total is None:
+                            gbif_total = data.get('count')
+
+                        if not results:
+                            end_of_records = True
                             break
-                            
+
                         for obs in results:
+                            n_scanned += 1
+                            county_hit = None
+                            o_lat = safe_float(obs.get('decimalLatitude'))
+                            o_lon = safe_float(obs.get('decimalLongitude'))
+                            if o_lat is not None and o_lon is not None:
+                                if active_region:
+                                    county_hit = locate_in_region(o_lat, o_lon, active_region)
+                                else:
+                                    county_hit = county_label(o_lat, o_lon)
+                            if active_region and county_hit is None:
+                                n_outside_region += 1
+                                continue
                             media = obs.get('media', [])
                             rec_url = ""
-                            
+
                             for m in media:
                                 if m.get('type') == 'StillImage' and m.get('identifier'):
                                     rec_url = m.get('identifier')
                                     break
-                                    
-                            if not rec_url: 
-                                continue 
-                                
+
+                            if not rec_url:
+                                n_no_image += 1
+                                continue
+
                             rec_url = ensure_url_scheme(rec_url)
                             y = obs.get('year') or (int(obs['eventDate'][:4]) if obs.get('eventDate') else None)
                             m = obs.get('month')
                             d = obs.get('day')
-                            
-                            if not y or not m or not d: 
+
+                            if not y or not m or not d:
+                                n_no_date += 1
                                 continue
-                                
-                            try: 
+
+                            try:
                                 doy = datetime(int(y), int(m), int(d)).timetuple().tm_yday
-                            except: 
-                                continue 
+                            except:
+                                n_no_date += 1
+                                continue
 
                             raw_records.append({
-                                "Data_Source": "GBIF Herbarium", 
-                                "Collector": obs.get('recordedBy', ''), 
+                                "Data_Source": "GBIF Herbarium",
+                                "Collector": obs.get('recordedBy', ''),
                                 "Col_Number": obs.get('recordNumber', ''),
-                                "Barcode": obs.get('catalogNumber', '') or obs.get('occurrenceID', ''), 
-                                "Species": obs.get('species', gbif_spp), 
-                                "Year": safe_int(y), 
-                                "DOY": doy, 
-                                "Latitude": obs.get('decimalLatitude'), 
-                                "Longitude": obs.get('decimalLongitude'), 
-                                "Elevation": obs.get('elevation', np.nan), 
-                                "URL": rec_url, 
-                                "Flowering": False, 
-                                "Fruiting": False, 
+                                "Barcode": obs.get('catalogNumber', '') or obs.get('occurrenceID', ''),
+                                "Species": obs.get('species', gbif_spp),
+                                "Year": safe_int(y),
+                                "DOY": doy,
+                                "Latitude": obs.get('decimalLatitude'),
+                                "Longitude": obs.get('decimalLongitude'),
+                                "Elevation": obs.get('elevation', np.nan),
+                                "URL": rec_url,
+                                "County": county_hit or "",
+                                "Flowering": False,
+                                "Fruiting": False,
                                 "Vegetative": False
                             })
-                            
+                            if county_hit:
+                                by_county[county_hit] = by_county.get(county_hit, 0) + 1
+
                         end_of_records = data.get('endOfRecords', True)
                         offset += 300
-                    else: 
+                    else:
+                        stats["notes"].append(
+                            f"GBIF returned HTTP {res.status_code} at offset {offset}, so the fetch stopped early "
+                            "and later records weren't retrieved. Try again in a moment."
+                        )
                         break
-                except: 
+                except Exception as e:
+                    stats["notes"].append(
+                        f"The GBIF request failed at offset {offset} ({type(e).__name__}), so the fetch stopped early "
+                        "and later records weren't retrieved. Try again in a moment."
+                    )
                     break
-                    
+
+            if not end_of_records and not stats["notes"]:
+                if offset >= 9000:
+                    stats["notes"].append(
+                        "Stopped after scanning 9,000 GBIF records (the app's scan cap); more matching specimens exist. "
+                        "Narrow the search with years, State or County to reach them."
+                    )
+                elif len(raw_records) >= max_to_fetch:
+                    stats["notes"].append(
+                        f"Stopped once {max_to_fetch:,} usable records were collected, to keep the fetch quick; "
+                        "more matching specimens exist."
+                    )
+
+            if gbif_total is not None:
+                stats["lines"].append(
+                    f"GBIF reports {gbif_total:,} matching specimens with coordinates"
+                    + (" inside the counties' search box" if active_region else "")
+                )
+            stats["lines"].append(f"{n_scanned:,} scanned")
+            if n_outside_region:
+                stats["lines"].append(f"{n_outside_region:,} skipped: outside the selected counties")
+            if active_region and ((g_states or "").strip() or (g_counties or "").strip()):
+                stats["notes"].append("The project counties are on, so your State/County text boxes were ignored for this fetch.")
+            if n_no_image:
+                stats["lines"].append(f"{n_no_image:,} skipped: no image")
+            if n_no_date:
+                stats["lines"].append(f"{n_no_date:,} skipped: no full collection date (year, month and day)")
+            stats["lines"].append(f"{len(raw_records):,} usable records")
+            if by_county:
+                stats["lines"].append(
+                    "Usable records by project county: "
+                    + ", ".join(f"{k} {v}" for k, v in sorted(by_county.items(), key=lambda kv: -kv[1]))
+                )
+
             pipeline_enrich_and_save(
-                pd.DataFrame(raw_records), 
-                target_limit=g_limit, 
-                max_per_year=g_max_yr, 
-                distribute_by_decade=g_decade
+                pd.DataFrame(raw_records),
+                target_limit=g_limit,
+                max_per_year=g_max_yr,
+                distribute_by_decade=g_decade,
+                fetch_stats=stats
             )
 
 with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
@@ -768,120 +1196,202 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
     with col_ie2: 
         i_emax = st.text_input("Max Elev (m):", key="i_emax")
         
-    if st.button("Fetch & Process iNat", type="primary", use_container_width=True):
+    if region_blocked:
+        st.warning("Fetching is paused: the project counties are switched on but none are selected (see 📍 Project Counties).")
+    if st.button("Fetch & Process iNat", type="primary", use_container_width=True, disabled=region_blocked):
         with st.spinner(f"Paginating iNaturalist..."):
             spp_encoded = urllib.parse.quote(inat_spp)
             e_min = parse_elev(i_emin)
             e_max = parse_elev(i_emax)
-            
-            s_list = [s.strip().lower() for s in i_states.split(',')] if i_states else []
-            c_list = [c.strip().lower() for c in i_counties.split(',')] if i_counties else []
-            
-            # --- PUT THESE 3 LINES BACK IN ---
+
+            s_list = [s.strip().lower() for s in i_states.split(',')] if (i_states and not active_region) else []
+            c_list = [c.strip().lower() for c in i_counties.split(',')] if (i_counties and not active_region) else []
+
             raw_records = []
             page = 1
             max_to_fetch = max(i_limit * 10, 500)
-            # ---------------------------------
-            
-            while len(raw_records) < max_to_fetch and page <= 15:                
+            stats = {"lines": [], "notes": []}
+            inat_total = None
+            exhausted = False
+            n_scanned = 0
+            n_no_uri = 0
+            n_place = 0
+            n_no_loc = 0
+            n_elev_out = 0
+            n_elev_fail = 0
+            n_bad_date = 0
+            n_outside_region = 0
+            by_county = {}
+            if active_region:
+                a_min_lat, a_max_lat, a_min_lon, a_max_lon = active_region["bbox"]
+
+            while len(raw_records) < max_to_fetch and page <= 15:
                 try:
                     url = f"https://api.inaturalist.org/v1/observations?taxon_name={spp_encoded}&d1={i_start}-01-01&d2={i_end}-12-31&per_page=200&page={page}&quality_grade=research"
+
+                    if active_region:
+                        url += f"&nelat={a_max_lat}&nelng={a_max_lon}&swlat={a_min_lat}&swlng={a_min_lon}"
                     
-                    # 1. Add a mandatory 1-second delay to respect iNaturalist's API limits
+                    # Mandatory delay to respect iNaturalist's API limits
                     time.sleep(1.0)
-                    
+
                     res = requests.get(url, timeout=10)
-                    
+
                     if res.status_code == 200:
-                        results = res.json().get('results', [])
-                        
-                        if not results: 
+                        payload = res.json()
+                        results = payload.get('results', [])
+                        if inat_total is None:
+                            inat_total = payload.get('total_results')
+
+                        if not results:
+                            exhausted = True
                             break
-                            
+
                         for obs in results:
+                            n_scanned += 1
+                            county_hit = None
                             rec_url = obs.get('uri', '')
-                            
-                            if not rec_url: 
+
+                            if not rec_url:
+                                n_no_uri += 1
                                 continue
-                                
+
                             rec_url = ensure_url_scheme(rec_url)
-                            pg = obs.get('place_guess', '').lower()
-                            
-                            if s_list and not any(s in pg for s in s_list): 
+                            # place_guess can be null for obscured/unlabelled observations
+                            pg = (obs.get('place_guess') or '').lower()
+
+                            if s_list and not any(s in pg for s in s_list):
+                                n_place += 1
                                 continue
-                            if c_list and not any(c in pg for c in c_list): 
+                            if c_list and not any(c in pg for c in c_list):
+                                n_place += 1
                                 continue
-                            
+
                             if obs.get('location') and obs.get('observed_on'):
                                 lat_str, lon_str = obs['location'].split(',')
                                 lat_flt = float(lat_str)
                                 lon_flt = float(lon_str)
+                                if active_region:
+                                    county_hit = locate_in_region(lat_flt, lon_flt, active_region)
+                                    if county_hit is None:
+                                        n_outside_region += 1
+                                        continue
+                                else:
+                                    county_hit = county_label(lat_flt, lon_flt)
                                 fetched_elev = np.nan
-                                
+
                                 if e_min is not None or e_max is not None:
-                                    
-                                    # --- ADD THIS LINE TO SLOW IT DOWN ---
                                     time.sleep(1)
-                                    
-                                    # (Your existing code that gets elevation)
                                     el = get_elevation(lat_flt, lon_flt)
-                                    
-                                    # (The diagnostic check we just added)
+
                                     if el is None:
-                                        st.sidebar.error(f"⚠️ Dropped: Open-Meteo Elevation failed for {lat_flt}, {lon_flt}. You might be rate-limited!")
+                                        n_elev_fail += 1
                                         continue
-                                        
-                                    if (e_min and el < e_min) or (e_max and el > e_max): 
+
+                                    if (e_min and el < e_min) or (e_max and el > e_max):
+                                        n_elev_out += 1
                                         continue
-                                        
+
                                     fetched_elev = el
-                                    
+
                                 try:
                                     dt = datetime.strptime(obs['observed_on'], "%Y-%m-%d")
                                     obs_year = dt.year
                                     obs_doy = dt.timetuple().tm_yday
-                                except: 
-                                    continue 
-                                    
+                                except:
+                                    n_bad_date += 1
+                                    continue
+
                                 raw_records.append({
-                                    "Data_Source": "iNaturalist", 
-                                    "Collector": obs.get('user', {}).get('login', ''), 
+                                    "Data_Source": "iNaturalist",
+                                    "Collector": (obs.get('user') or {}).get('login', ''),
                                     "Col_Number": np.nan,
-                                    "Barcode": str(obs.get('id', '')), 
-                                    "Species": obs.get('taxon', {}).get('name', inat_spp), 
-                                    "Year": obs_year, 
-                                    "DOY": obs_doy, 
-                                    "Latitude": lat_flt, 
-                                    "Longitude": lon_flt, 
-                                    "Elevation": fetched_elev, 
-                                    "URL": rec_url, 
-                                    "Flowering": False, 
-                                    "Fruiting": False, 
+                                    "Barcode": str(obs.get('id', '')),
+                                    "Species": (obs.get('taxon') or {}).get('name', inat_spp),
+                                    "Year": obs_year,
+                                    "DOY": obs_doy,
+                                    "Latitude": lat_flt,
+                                    "Longitude": lon_flt,
+                                    "Elevation": fetched_elev,
+                                    "URL": rec_url,
+                                    "County": county_hit or "",
+                                    "Flowering": False,
+                                    "Fruiting": False,
                                     "Vegetative": False
                                 })
-                                
-                        if len(results) < 200: 
-                            break 
+                                if county_hit:
+                                    by_county[county_hit] = by_county.get(county_hit, 0) + 1
+                            else:
+                                n_no_loc += 1
+
+                        if len(results) < 200:
+                            exhausted = True
+                            break
                         page += 1
                     else:
-                        # 2. STOP SILENT FAILURES: Show the actual API error code
-                        st.sidebar.error(f"⚠️ iNaturalist API Error: HTTP {res.status_code}")
+                        stats["notes"].append(
+                            f"iNaturalist returned HTTP {res.status_code} on page {page}, so the fetch stopped early "
+                            "and later observations weren't retrieved. Try again in a moment."
+                        )
                         break
-                except Exception as e: 
-                    # 3. Catch connection timeouts and show them
-                    st.sidebar.error(f"⚠️ Connection Failed: {e}")
+                except Exception as e:
+                    stats["notes"].append(
+                        f"The iNaturalist fetch hit an error on page {page} ({type(e).__name__}: {e}), "
+                        "so it stopped early and later observations weren't retrieved."
+                    )
                     break
+
+            if not exhausted and not stats["notes"]:
+                if len(raw_records) >= max_to_fetch:
+                    stats["notes"].append(
+                        f"Stopped once {max_to_fetch:,} usable records were collected, to keep the fetch quick; "
+                        "more matching observations exist."
+                    )
+                elif page > 15:
+                    stats["notes"].append(
+                        "Stopped after 15 pages (3,000 observations), the app's page cap; more matching observations "
+                        "exist. Narrow the search with years, State or County to reach them."
+                    )
+
+            if inat_total is not None:
+                stats["lines"].append(
+                    f"iNaturalist reports {inat_total:,} matching research-grade observations"
+                    + (" inside the counties' search box" if active_region else "")
+                )
+            stats["lines"].append(f"{n_scanned:,} scanned")
+            for n, label in [
+                (n_no_uri, "skipped: no record link"),
+                (n_place, "skipped: outside your State/County text filter"),
+                (n_no_loc, "skipped: no public location or date (often obscured or private)"),
+                (n_outside_region, "skipped: outside the selected counties"),
+                (n_elev_fail, "dropped: elevation lookup failed"),
+                (n_elev_out, "skipped: outside your elevation range"),
+                (n_bad_date, "skipped: unreadable date"),
+            ]:
+                if n:
+                    stats["lines"].append(f"{n:,} {label}")
+            stats["lines"].append(f"{len(raw_records):,} usable records")
+            if by_county:
+                stats["lines"].append(
+                    "Usable records by project county: "
+                    + ", ".join(f"{k} {v}" for k, v in sorted(by_county.items(), key=lambda kv: -kv[1]))
+                )
+
+            if active_region and ((i_states or "").strip() or (i_counties or "").strip()):
+                stats["notes"].append("The project counties are on, so your State/County text boxes were ignored for this fetch.")
             
-            # 4. Warn the user if filtering dropped everything
             if not raw_records:
                 st.sidebar.warning("No records matched your search. If you used State/County filters, try clearing them!")
-                    
+
             pipeline_enrich_and_save(
-                pd.DataFrame(raw_records), 
-                target_limit=i_limit, 
-                max_per_year=i_max_yr, 
-                distribute_by_decade=i_decade
+                pd.DataFrame(raw_records),
+                target_limit=i_limit,
+                max_per_year=i_max_yr,
+                distribute_by_decade=i_decade,
+                fetch_stats=stats
             )
+
+render_fetch_summary()
 
 st.sidebar.write("---")
 if st.sidebar.button("🗑️ Clear Entire Database"):
