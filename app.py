@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import os
 import time
+import random
 import re
 from datetime import datetime
 import urllib.parse
@@ -229,16 +230,20 @@ def smart_sleep():
 
     LAST_API_CALL_TIME = time.time()
 
+class _ClimateNAError(Exception):
+    """Carries an error dict out of the cached function. Streamlit never caches an
+    exception, so a rate-limit or timeout is not remembered once the limit resets."""
+    def __init__(self, payload):
+        super().__init__(payload.get("error", "ClimateNA error"))
+        self.payload = payload
+
 @st.cache_data(persist="disk", show_spinner=False, max_entries=5000)
-def get_climate_data(lat, lon, el, prd):    
-    if pd.isna(el) or el is None:
-        return {"error": "Elevation missing", "systemic": False}
-    
+def _get_climate_data_cached(lat, lon, el, prd):
     base = "https://api.climatena.ca/api/cnaApi6/LatLonEl"
     url = f"{base}?ID1=1&ID2=t1&lat={lat}&lon={lon}&el={el}&prd={prd}&varYSM=YSM"
-    
+
     try:
-        smart_sleep() 
+        smart_sleep()
         res = requests.get(url, timeout=15)
         if res.status_code == 200:
             try:
@@ -247,17 +252,27 @@ def get_climate_data(lat, lon, el, prd):
                     return data[0]
                 return data
             except ValueError:
-                return {"error": "API returned an HTML block page instead of data.", "systemic": True}
+                raise _ClimateNAError({"error": "API returned an HTML block page instead of data.", "systemic": True})
         elif res.status_code in [403, 429]:
-            return {"error": f"API Rate Limit Exceeded (HTTP {res.status_code})", "systemic": True}
+            raise _ClimateNAError({"error": f"API Rate Limit Exceeded (HTTP {res.status_code})", "systemic": True})
         elif res.status_code == 400:
-            return {"error": f"Server Error (HTTP 400) - Bad Request formatting.", "systemic": True}
+            raise _ClimateNAError({"error": "Server Error (HTTP 400) - Bad Request formatting.", "systemic": True})
         else:
-            return {"error": f"Server Error (HTTP {res.status_code})", "systemic": True}
+            raise _ClimateNAError({"error": f"Server Error (HTTP {res.status_code})", "systemic": True})
+    except _ClimateNAError:
+        raise
     except requests.exceptions.Timeout:
-        return {"error": "API Request Timed Out", "systemic": True}
-    except Exception as e:
-        return {"error": f"Connection Failed", "systemic": True}
+        raise _ClimateNAError({"error": "API Request Timed Out", "systemic": True})
+    except Exception:
+        raise _ClimateNAError({"error": "Connection Failed", "systemic": True})
+
+def get_climate_data(lat, lon, el, prd):
+    if pd.isna(el) or el is None:
+        return {"error": "Elevation missing", "systemic": False}
+    try:
+        return _get_climate_data_cached(lat, lon, el, prd)
+    except _ClimateNAError as e:
+        return e.payload
 
 def calc_prior_3_months(year, doy):
     try:
@@ -655,6 +670,106 @@ def render_fetch_summary():
         st.session_state.pop("last_fetch_summary", None)
         st.rerun()
 
+# ==========================================
+#   AUTO-RESUME (keep fetching until a target)
+# ==========================================
+# When ClimateNA's download limit is hit, the app saves what it has, waits a random 61-75
+# minutes (settings in the sidebar), then repeats the same fetch. Records that are already
+# saved are skipped, so each round carries on where the last one stopped.
+
+def ar_begin(source):
+    """Called when a fetch button is clicked by hand."""
+    if st.session_state.get("ar_on"):
+        wmin = int(st.session_state.get("ar_wait_min", 61))
+        wmax = max(int(st.session_state.get("ar_wait_max", 75)), wmin)
+        st.session_state["ar_state"] = {
+            "active": True, "source": source, "added": 0, "rounds_done": 0, "no_progress": 0,
+            "target": int(st.session_state.get("ar_target", 100)),
+            "max_rounds": int(st.session_state.get("ar_rounds", 10)),
+            "wait_min": wmin, "wait_max": wmax, "wait_until": None, "trigger": None, "final": None,
+        }
+    else:
+        st.session_state.pop("ar_state", None)
+
+def ar_take_trigger(source):
+    s = st.session_state.get("ar_state")
+    if s and s.get("active") and s.get("trigger") == source:
+        s["trigger"] = None
+        return True
+    return False
+
+def ar_finish(reason):
+    s = st.session_state.get("ar_state")
+    if not s or not s.get("active"):
+        return
+    s["active"] = False
+    s["wait_until"] = None
+    s["trigger"] = None
+    s["final"] = f"Auto-resume finished: {reason} (added {s['added']:,} new record(s) over {s['rounds_done']} round(s))."
+    summary = st.session_state.get("last_fetch_summary")
+    if summary is not None:
+        summary["notes"].append(s["final"])
+
+def ar_after_round(n_saved, sys_error):
+    """Decide what happens after a round. Returns 'wait', 'again', 'stop' or None (not auto-running)."""
+    s = st.session_state.get("ar_state")
+    if not s or not s.get("active"):
+        return None
+    s["added"] += n_saved
+    s["rounds_done"] += 1
+    s["no_progress"] = 0 if n_saved else s["no_progress"] + 1
+    if s["added"] >= s["target"]:
+        ar_finish(f"reached the target of {s['target']:,} new records")
+    elif s["rounds_done"] >= s["max_rounds"]:
+        ar_finish(f"used all {s['max_rounds']} rounds without reaching the target of {s['target']:,}")
+    elif sys_error:
+        if s["no_progress"] >= 2:
+            ar_finish("two rounds in a row saved nothing, so the limit may not be hourly or something else is wrong")
+        else:
+            s["wait_until"] = time.time() + random.uniform(s["wait_min"] * 60, s["wait_max"] * 60)
+            return "wait"
+    elif n_saved == 0:
+        ar_finish("this round saved nothing new")
+    else:
+        s["trigger"] = s["source"]
+        return "again"
+    return "stop"
+
+def ar_render_status():
+    s = st.session_state.get("ar_state")
+    if not s:
+        return
+    if s.get("active"):
+        st.info(
+            f"Auto-resume is running: {s['added']:,} of {s['target']:,} new records added, "
+            f"{s['rounds_done']} round(s) done (up to {s['max_rounds']})."
+        )
+        if st.button("Cancel auto-resume", key="ar_cancel"):
+            ar_finish("cancelled")
+            st.rerun()
+    elif s.get("final"):
+        st.success(s["final"])
+
+def ar_wait_if_needed(placeholder):
+    """Runs at the very end of the script so the page is fully drawn while we wait."""
+    s = st.session_state.get("ar_state")
+    if not s or not s.get("active") or not s.get("wait_until"):
+        return
+    while True:
+        left = s["wait_until"] - time.time()
+        if left <= 0:
+            break
+        mins, secs = divmod(int(left), 60)
+        placeholder.info(
+            f"⏳ ClimateNA limit reached. Round {s['rounds_done'] + 1} of up to {s['max_rounds']} "
+            f"starts in {mins}:{secs:02d}. Added {s['added']:,} of {s['target']:,} so far. "
+            "Keep this tab open and the computer awake."
+        )
+        time.sleep(min(1.0, max(left, 0.05)))
+    s["wait_until"] = None
+    s["trigger"] = s["source"]
+    st.rerun()
+
 def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by_decade=False, fetch_stats=None):
     summary = {
         "lines": list((fetch_stats or {}).get("lines", [])),
@@ -668,6 +783,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
     if raw_df.empty:
         _publish()
         st.sidebar.warning("No records found (or none passed the filters).")
+        ar_finish("no usable records were found")
         return
 
     # --- Skip specimens that are already stored in the shared database ---
@@ -682,6 +798,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
         summary["notes"].append("Every usable record from this search is already in the database, so nothing was added.")
         _publish()
         st.sidebar.info("Nothing new to add -- all matching records are already in the database.")
+        ar_finish("nothing new is left to add for this search")
         return
 
     st.sidebar.text("Applying de-clustering & sample distribution...")
@@ -700,6 +817,7 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
     if cleaned_df.empty:
         _publish()
         st.sidebar.warning("No valid records remained after filtering.")
+        ar_finish("no valid records remained after filtering")
         return
 
     records = []
@@ -861,6 +979,11 @@ def pipeline_enrich_and_save(raw_df, target_limit, max_per_year=3, distribute_by
             combined_df = pd.concat([master_df, final_new_df], ignore_index=True)
             save_with_ordered_columns(combined_df, DB_FILE)
 
+    auto_action = ar_after_round(len(records), sys_error)
+    if auto_action in ("wait", "again"):
+        st.rerun()
+
+    if records:
         if sys_error is not None:
             render_fetch_summary()
             st.stop()
@@ -983,6 +1106,28 @@ with st.sidebar.expander("📍 Project Counties (Wasatch & Uinta)", expanded=Fal
             except Exception:
                 st.caption("Map preview isn't available in this setup.")
 
+with st.sidebar.expander(
+    "🔁 Auto-resume until a target (ClimateNA limits)",
+    expanded=bool((st.session_state.get("ar_state") or {}).get("active")),
+):
+    st.caption(
+        "If ClimateNA stops answering (download limit), the app saves what it has, waits a random "
+        "time in the window below, then repeats the same fetch. Records already saved are skipped, "
+        "so each round carries on where the last stopped. Turn this on, then click a Fetch button. "
+        "Keep this browser tab open and the computer awake "
+        "(on a Mac, running `caffeinate -d` in Terminal prevents sleep)."
+    )
+    st.checkbox("Keep fetching automatically until the target is reached", value=False, key="ar_on")
+    st.number_input("Stop after adding this many NEW records:", min_value=1, max_value=100000, value=100, step=10, key="ar_target")
+    st.number_input("Maximum number of rounds:", min_value=1, max_value=200, value=10, key="ar_rounds")
+    st.number_input("Wait between rounds, at least (minutes):", min_value=1, max_value=240, value=61, key="ar_wait_min")
+    st.number_input("Wait between rounds, at most (minutes):", min_value=1, max_value=240, value=75, key="ar_wait_max")
+    ar_render_status()
+    if st.button("Clear saved ClimateNA/lookup cache", key="ar_clear_cache"):
+        st.cache_data.clear()
+        st.success("Cache cleared.")
+ar_status_ph = st.sidebar.empty()
+
 with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     gbif_spp = st.text_input("Species Name (GBIF):", key="g_spp")
 
@@ -1011,7 +1156,11 @@ with st.sidebar.expander("🌐 Fetch from GBIF", expanded=False):
     
     if region_blocked:
         st.warning("Fetching is paused: the project counties are switched on but none are selected (see 📍 Project Counties).")
-    if st.button("Fetch & Process GBIF", type="primary", use_container_width=True, disabled=region_blocked):
+    _clicked_gbif = st.button("Fetch & Process GBIF", type="primary", use_container_width=True, disabled=region_blocked)
+    _auto_gbif = ar_take_trigger("gbif")
+    if _clicked_gbif:
+        ar_begin("gbif")
+    if _clicked_gbif or _auto_gbif:
         with st.spinner("Paginating GBIF..."):
             spp_encoded = urllib.parse.quote(gbif_spp)
             e_min = parse_elev(g_emin)
@@ -1198,7 +1347,11 @@ with st.sidebar.expander("📸 Fetch from iNaturalist", expanded=False):
         
     if region_blocked:
         st.warning("Fetching is paused: the project counties are switched on but none are selected (see 📍 Project Counties).")
-    if st.button("Fetch & Process iNat", type="primary", use_container_width=True, disabled=region_blocked):
+    _clicked_inat = st.button("Fetch & Process iNat", type="primary", use_container_width=True, disabled=region_blocked)
+    _auto_inat = ar_take_trigger("inat")
+    if _clicked_inat:
+        ar_begin("inat")
+    if _clicked_inat or _auto_inat:
         with st.spinner(f"Paginating iNaturalist..."):
             spp_encoded = urllib.parse.quote(inat_spp)
             e_min = parse_elev(i_emin)
@@ -2243,3 +2396,6 @@ with tab6:
             mime="text/csv", 
             key="download_master_btn"
         )
+
+# Auto-resume countdown (kept last so the whole page is drawn first)
+ar_wait_if_needed(ar_status_ph)
