@@ -180,27 +180,34 @@ def ensure_url_scheme(url_str):
         
     return url_str
 
+class _ElevationError(Exception):
+    pass
+
 @st.cache_data(persist="disk", show_spinner=False, max_entries=5000)
+def _get_elevation_cached(lat, lon):
+    """Only successful lookups are cached (an exception is never cached by Streamlit)."""
+    last = None
+    for attempt in range(3):
+        try:
+            smart_sleep()  # Slow down requests to avoid IP bans
+            url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
+            res = requests.get(url, timeout=10)
+            res.raise_for_status()
+            elevations = res.json().get('elevation')
+            if elevations and len(elevations) > 0:
+                return float(elevations[0])
+            last = "no elevation returned"
+        except Exception as e:
+            last = e
+        time.sleep(1.5 * (attempt + 1))
+    print(f"Elevation API failed for Lat: {lat}, Lon: {lon} | Error: {last}")
+    raise _ElevationError(str(last))
+
 def get_elevation(lat, lon):
     try:
-        smart_sleep()  # Slow down requests to avoid IP bans
-        url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
-        res = requests.get(url, timeout=5)
-        
-        # This will trigger the exception block below if Open-Meteo blocks us (e.g., 429 or 403 errors)
-        res.raise_for_status() 
-        
-        if res.status_code == 200:
-            elevations = res.json().get('elevation')
-            if elevations and len(elevations) > 0: 
-                return float(elevations[0])
-                
-    except Exception as e: 
-        # Now you will actually see the error in your terminal running Streamlit!
-        print(f"⚠️ Elevation API failed for Lat: {lat}, Lon: {lon} | Error: {e}")
+        return _get_elevation_cached(lat, lon)
+    except _ElevationError:
         return None
-        
-    return None
 
 def normalize_location(lat, lon, provided_elev=None):
     """
